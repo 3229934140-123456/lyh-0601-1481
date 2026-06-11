@@ -14,6 +14,8 @@ import type {
   UsageScenario,
   QualityReportV2,
   CandidatePoolSource,
+  TenderDecision,
+  TenderTier,
 } from './types';
 
 export function checkLength(text: string, limit?: LengthLimit): LengthCheckResult {
@@ -904,4 +906,131 @@ export class QualityChecker {
       }),
     }));
   }
+
+  public classifyTenderDecisions(
+    candidates: CopyCandidate[],
+    options?: { productInfo?: ProductInfo; qualityThreshold?: number }
+  ): (CopyCandidate & { tenderDecision?: TenderDecision })[] {
+    return classifyTenderDecisions(candidates, options);
+  }
+}
+
+export const SCENARIO_NAMES: Record<UsageScenario, string> = {
+  search_title: '搜索标题',
+  detail_hero: '详情页首屏',
+  sms_promo: '短信促销',
+  social_grass: '社媒种草',
+  live_stream: '直播话术',
+  email_marketing: '邮件营销',
+  banner_ad: 'Banner广告',
+  push_notification: 'Push推送',
+};
+
+export const TIER_NAMES: Record<TenderTier, string> = {
+  main_push: '主推',
+  backup: '备选',
+  eliminated: '淘汰',
+};
+
+export function classifyTenderDecisions(
+  candidates: CopyCandidate[],
+  options: {
+    productInfo?: ProductInfo;
+    qualityThreshold?: number;
+    mainPushRatio?: number;
+    backupRatio?: number;
+  } = {}
+): (CopyCandidate & { tenderDecision?: TenderDecision })[] {
+  const threshold = options.qualityThreshold ?? 0.6;
+  const mainPushRatio = options.mainPushRatio ?? 0.3;
+  const backupRatio = options.backupRatio ?? 0.5;
+
+  const scored = candidates.map((c) => {
+    const scenarios = c.qualityReportV2?.recommendScenarios
+      || recommendUsageScenarios(c.content, { productInfo: options.productInfo });
+    const qualityScore = c.qualityReportV2?.overallScore ?? c.qualityReport?.overallScore ?? c.score ?? 0;
+    const topScenario = scenarios[0];
+    return {
+      candidate: c,
+      scenarios,
+      qualityScore,
+      topScenario,
+      compositeScore: qualityScore * 0.6 + (topScenario?.fitScore ?? 0) * 0.4,
+    };
+  });
+
+  scored.sort((a, b) => b.compositeScore - a.compositeScore);
+
+  const total = scored.length;
+  const mainPushCount = Math.max(1, Math.round(total * mainPushRatio));
+  const backupCount = Math.max(1, Math.round(total * backupRatio));
+
+  return scored.map((item, idx) => {
+    let tier: TenderTier;
+    let tierName: string;
+    let priority: number;
+
+    if (item.qualityScore < threshold) {
+      tier = 'eliminated';
+      tierName = TIER_NAMES.eliminated;
+      priority = 3;
+    } else if (idx < mainPushCount) {
+      tier = 'main_push';
+      tierName = TIER_NAMES.main_push;
+      priority = 1;
+    } else if (idx < mainPushCount + backupCount) {
+      tier = 'backup';
+      tierName = TIER_NAMES.backup;
+      priority = 2;
+    } else {
+      tier = 'eliminated';
+      tierName = TIER_NAMES.eliminated;
+      priority = 3;
+    }
+
+    const decisionReason: string[] = [];
+    decisionReason.push(`综合评分：${(item.compositeScore * 100).toFixed(0)}分`);
+    if (item.qualityScore >= 0.8) decisionReason.push('质量优秀');
+    else if (item.qualityScore >= threshold) decisionReason.push('质量达标');
+    else decisionReason.push(`质量分低于阈值${Math.round(threshold * 100)}分`);
+
+    if (item.candidate.poolInfo?.isPreferred) {
+      decisionReason.push('命中偏好风格池');
+    }
+    if (item.candidate.qualityReportV2?.keywords.allIncluded) {
+      decisionReason.push('关键词全部覆盖');
+    }
+    if (item.candidate.hasSensitive) {
+      decisionReason.push('含敏感词风险');
+    }
+    if (item.candidate.qualityReportV2?.isDuplicate) {
+      decisionReason.push('与其他候选相似');
+    }
+
+    const suitableChannels = item.scenarios.slice(0, 4).map((s) => ({
+      scenario: s.scenario,
+      scenarioName: SCENARIO_NAMES[s.scenario],
+      fitScore: s.fitScore,
+      reason: s.reason,
+    }));
+
+    const primaryScenario = item.topScenario?.scenario ?? 'search_title';
+    const primaryFit = item.topScenario?.fitScore ?? 0;
+
+    const decision: TenderDecision = {
+      tier,
+      tierName,
+      priority,
+      primaryChannel: primaryScenario,
+      primaryChannelName: SCENARIO_NAMES[primaryScenario],
+      primaryChannelFit: Math.round(primaryFit * 100) / 100,
+      suitableChannels,
+      decisionReason,
+    };
+
+    return {
+      ...item.candidate,
+      tenderDecision: decision,
+    };
+  });
 }

@@ -24,6 +24,8 @@ import type {
   BatchQualityReport,
   TemplateValidationResult,
   BatchTemplateHealth,
+  GenerateResult,
+  TenderDecision,
 } from './types';
 import { AIClient } from './aiClient';
 import { SensitiveWordChecker } from './sensitive';
@@ -38,6 +40,7 @@ import {
   isTruncated as isTruncatedUtil,
   generateBatchQualityReport as generateBatchQualityReportUtil,
   findSimilarGroups as findSimilarGroupsUtil,
+  classifyTenderDecisions as classifyTenderDecisionsUtil,
 } from './quality';
 
 function generateRecordId(): string {
@@ -304,6 +307,58 @@ export class CopySDK {
     }
   ): import('./types').ScenarioRecommendation[] {
     return this.qualityChecker.recommendScenarios(text, options);
+  }
+
+  public async generateAdvanced(
+    type: CopyType,
+    params: BaseGenerateParams,
+    options?: GenerateOptions
+  ): Promise<GenerateResult> {
+    const mergedParams = this.mergeDefaultParams(params);
+    const recordId = generateRecordId();
+
+    const record: GenerationRecord = {
+      id: recordId,
+      type,
+      productInfo: mergedParams.productInfo,
+      params: mergedParams as Record<string, unknown>,
+      candidates: [],
+      status: 'success',
+      createdAt: Date.now(),
+    };
+
+    try {
+      const result = await this.generator.generateAdvanced(type, mergedParams, options);
+      record.candidates = result.candidates;
+      record.status = result.candidates.length > 0 ? 'success' : 'partial';
+      record.completedAt = Date.now();
+      record.duration = Date.now() - record.createdAt;
+
+      this.recordManager.addRecord(record);
+
+      return result;
+    } catch (error) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      record.status = 'failed';
+      record.error = err.message;
+      record.completedAt = Date.now();
+      record.duration = Date.now() - record.createdAt;
+
+      this.recordManager.addRecord(record);
+
+      if (this.config.onError) {
+        this.config.onError(err, { type, params: mergedParams });
+      }
+
+      throw err;
+    }
+  }
+
+  public classifyTenderDecisions(
+    candidates: CopyCandidate[],
+    options?: { productInfo?: ProductInfo; qualityThreshold?: number }
+  ): (CopyCandidate & { tenderDecision?: TenderDecision })[] {
+    return classifyTenderDecisionsUtil(candidates, options);
   }
 
   public truncateText(text: string, limit: LengthLimit): string {

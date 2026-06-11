@@ -68,6 +68,7 @@ export type CopyCandidate = {
   wasTruncated: boolean;
   truncateInfo?: TruncateResult;
   poolInfo?: CandidatePoolSource;
+  tenderDecision?: TenderDecision;
   createdAt: number;
   metadata?: Record<string, unknown>;
 };
@@ -140,6 +141,8 @@ export type PoolConfig = {
   disabledStyles?: PoolStyle[];
   disabledPatterns?: string[];
   weightByStyle?: Partial<Record<PoolStyle, number>>;
+  strictMode?: boolean;
+  targetRatioByStyle?: Partial<Record<PoolStyle, number>>;
 };
 
 export type CandidatePoolSource = {
@@ -148,6 +151,8 @@ export type CandidatePoolSource = {
   style: PoolStyle;
   matchScore: number;
   selectedReason: string;
+  isPreferred?: boolean;
+  isDisabled?: boolean;
 };
 
 export type UsageScenario =
@@ -170,6 +175,69 @@ export type QualityReportV2 = QualityReport & {
   recommendScenarios: ScenarioRecommendation[];
   rankingBasis: string[];
   poolInfo?: CandidatePoolSource;
+};
+
+export type TenderTier = 'main_push' | 'backup' | 'eliminated';
+
+export type TenderDecision = {
+  tier: TenderTier;
+  tierName: string;
+  priority: number;
+  primaryChannel: UsageScenario;
+  primaryChannelName: string;
+  primaryChannelFit: number;
+  suitableChannels: Array<{
+    scenario: UsageScenario;
+    scenarioName: string;
+    fitScore: number;
+    reason: string;
+  }>;
+  decisionReason: string[];
+};
+
+export type FilteredCandidate = {
+  content: string;
+  filterReason: string;
+  filterType:
+    | 'disabled_style'
+    | 'disabled_pattern'
+    | 'sensitive_word'
+    | 'duplicate'
+    | 'quality_below_threshold'
+    | 'length_invalid'
+    | 'keyword_missing'
+    | 'pool_excluded';
+  poolInfo?: CandidatePoolSource;
+  qualityScore?: number;
+};
+
+export type GenerationTrace = {
+  seed: number;
+  poolConfig?: PoolConfig;
+  enableDeduplication: boolean;
+  enableSorting: boolean;
+  enableQualityCheck: boolean;
+  enableSensitiveCheck: boolean;
+  targetCount: number;
+  rawGeneratedCount: number;
+  rankingCriteria: string[];
+  rankingBasis: string[];
+  filteredCandidates: FilteredCandidate[];
+  styleDistribution: Partial<Record<PoolStyle, number>>;
+  generationTimeMs: number;
+  deduplicationRemovedCount: number;
+  qualityFilteredCount: number;
+  sensitiveFilteredCount: number;
+  poolFilteredCount: number;
+  lengthFilteredCount: number;
+  keywordFilteredCount: number;
+  refillCount: number;
+};
+
+export type GenerateResult = {
+  candidates: CopyCandidate[];
+  trace?: GenerationTrace;
+  tenderDecisions?: TenderDecision[];
 };
 
 export type SellingPointParams = BaseGenerateParams & {
@@ -209,6 +277,12 @@ export type GenerateOptions = {
   enableQualityCheck?: boolean;
   timeout?: number;
   retry?: Partial<RetryConfig>;
+  returnTrace?: boolean;
+  returnTenderDecisions?: boolean;
+  enableTenderClassification?: boolean;
+  strictPoolFilter?: boolean;
+  autoRefillOnFilter?: boolean;
+  qualityThreshold?: number;
 };
 
 export type BatchGenerateItem<T extends BaseGenerateParams = BaseGenerateParams> = {

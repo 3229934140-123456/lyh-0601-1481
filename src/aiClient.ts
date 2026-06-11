@@ -10,6 +10,7 @@ import type {
   PoolStyle,
   CandidatePoolSource,
   PoolConfig,
+  FilteredCandidate,
 } from './types';
 import { SeededRandom, hashStringToSeed } from './utils/random';
 
@@ -62,6 +63,8 @@ export type GenerateResponse = {
     tags: string[];
     poolInfo?: CandidatePoolSource;
   }>;
+  filteredCandidates?: FilteredCandidate[];
+  rawGeneratedCount?: number;
 };
 
 export class AIClient {
@@ -116,15 +119,19 @@ export class AIClient {
     poolName: string,
     style: PoolStyle,
     matchScore: number,
-    reason: string
+    reason: string,
+    poolConfig?: PoolConfig
   ): CandidatePoolSource {
-    return { poolId, poolName, style, matchScore, selectedReason: reason };
+    const isPreferred = poolConfig?.preferredStyles?.includes(style);
+    const isDisabled = poolConfig?.disabledStyles?.includes(style);
+    return { poolId, poolName, style, matchScore, selectedReason: reason, isPreferred, isDisabled };
   }
 
   private classifyPoolStyle(
     content: string,
     copyType: CopyType,
-    index: number
+    index: number,
+    poolConfig?: PoolConfig
   ): CandidatePoolSource {
     const styles: Array<{ style: PoolStyle; name: string; keywords: string[]; score: number }> = [
       {
@@ -218,43 +225,91 @@ export class AIClient {
     }
     reasons.push(`匹配度${Math.round(matchScore * 100)}%`);
 
-    return {
-      poolId: `pool_${best.style}_${index}`,
-      poolName: best.name,
-      style: best.style,
-      matchScore: Math.round(matchScore * 100) / 100,
-      selectedReason: reasons.join('；'),
-    };
+    return this.makePoolInfo(
+      `pool_${best.style}_${index}`,
+      best.name,
+      best.style,
+      Math.round(matchScore * 100) / 100,
+      reasons.join('；'),
+      poolConfig
+    );
   }
 
-  private applyPoolConfig<T extends { poolInfo?: CandidatePoolSource }>(
+  private applyPoolConfig<T extends { content: string; poolInfo?: CandidatePoolSource }>(
     items: T[],
     poolConfig?: PoolConfig
-  ): T[] {
-    if (!poolConfig) return items;
+  ): { kept: T[]; filtered: FilteredCandidate[] } {
+    if (!poolConfig) return { kept: items, filtered: [] };
 
-    let result = [...items];
+    const filtered: FilteredCandidate[] = [];
+    let kept: T[] = [];
 
     if (poolConfig.disabledStyles && poolConfig.disabledStyles.length > 0) {
-      result = result.filter(item =>
-        !item.poolInfo || !poolConfig.disabledStyles!.includes(item.poolInfo.style)
-      );
+      kept = items.filter(item => {
+        if (item.poolInfo && poolConfig.disabledStyles!.includes(item.poolInfo.style)) {
+          filtered.push({
+            content: item.content,
+            filterReason: `禁用风格池：${item.poolInfo.poolName}`,
+            filterType: 'disabled_style',
+            poolInfo: item.poolInfo,
+          });
+          return false;
+        }
+        return true;
+      });
+    } else {
+      kept = [...items];
     }
 
     if (poolConfig.disabledPatterns && poolConfig.disabledPatterns.length > 0) {
-      // disabledPatterns 由上层在生成时处理，这里只做二次过滤
+      const patterns = poolConfig.disabledPatterns;
+      kept = kept.filter(item => {
+        for (const p of patterns) {
+          if (item.content.includes(p)) {
+            filtered.push({
+              content: item.content,
+              filterReason: `命中禁用套路："${p}"`,
+              filterType: 'disabled_pattern',
+              poolInfo: item.poolInfo,
+            });
+            return false;
+          }
+        }
+        return true;
+      });
+    }
+
+    if (poolConfig.strictMode && poolConfig.preferredStyles && poolConfig.preferredStyles.length > 0) {
+      const preferred = new Set(poolConfig.preferredStyles);
+      kept = kept.filter(item => {
+        if (item.poolInfo && !preferred.has(item.poolInfo.style)) {
+          filtered.push({
+            content: item.content,
+            filterReason: `严格模式下仅保留偏好风格：${poolConfig.preferredStyles!.join('、')}，当前为 ${item.poolInfo.poolName}`,
+            filterType: 'pool_excluded',
+            poolInfo: item.poolInfo,
+          });
+          return false;
+        }
+        return true;
+      });
     }
 
     if (poolConfig.preferredStyles && poolConfig.preferredStyles.length > 0) {
       const preferred = new Set(poolConfig.preferredStyles);
-      result.sort((a, b) => {
-        const aScore = a.poolInfo && preferred.has(a.poolInfo.style) ? 1 : 0;
-        const bScore = b.poolInfo && preferred.has(b.poolInfo.style) ? 1 : 0;
+      const weights = poolConfig.weightByStyle || {};
+      kept.sort((a, b) => {
+        const aScore = a.poolInfo && preferred.has(a.poolInfo.style)
+          ? (weights[a.poolInfo.style] || 2)
+          : (a.poolInfo ? (weights[a.poolInfo.style] || 1) : 1);
+        const bScore = b.poolInfo && preferred.has(b.poolInfo.style)
+          ? (weights[b.poolInfo.style] || 2)
+          : (b.poolInfo ? (weights[b.poolInfo.style] || 1) : 1);
         return bScore - aScore;
       });
     }
 
-    return result;
+    return { kept, filtered };
   }
 
   public async generate(
@@ -265,48 +320,206 @@ export class AIClient {
     this.initRng(params);
 
     const id = generateId();
-    const count = params.candidateCount || 3;
+    const targetCount = params.candidateCount || 3;
 
-    let result: GenerateResponse;
+    const poolConfig = params.poolConfig;
+    const oversampleRatio = poolConfig && (poolConfig.disabledStyles?.length || poolConfig.disabledPatterns?.length || poolConfig.strictMode) ? 2.5 : 1.2;
+    const generateCount = Math.max(targetCount, Math.ceil(targetCount * oversampleRatio));
 
-    switch (type) {
-      case 'selling_point':
-        result = this.generateSellingPoints(id, params as SellingPointParams, count);
-        break;
-      case 'title':
-        result = this.generateTitles(id, params as TitleParams, count);
-        break;
-      case 'promo_short':
-        result = this.generatePromoShorts(id, params as PromoShortParams, count);
-        break;
-      case 'long_form':
-        result = this.generateLongForms(id, params as LongFormParams, count);
-        break;
-      case 'tone_adjust':
-        result = this.generateToneAdjusts(id, params as ToneAdjustParams, count);
-        break;
-      default:
-        result = { id, candidates: [] };
+    const allFiltered: FilteredCandidate[] = [];
+    let keptCandidates: Array<{ content: string; score: number; tags: string[]; poolInfo?: CandidatePoolSource }> = [];
+    let rawGeneratedCount = 0;
+    let attempts = 0;
+    const maxAttempts = 3;
+
+    while (keptCandidates.length < targetCount && attempts < maxAttempts) {
+      const runCount = attempts === 0 ? generateCount : Math.ceil(targetCount * 2);
+      let result: GenerateResponse;
+
+      switch (type) {
+        case 'selling_point':
+          result = this.generateSellingPoints(id, params as SellingPointParams, runCount);
+          break;
+        case 'title':
+          result = this.generateTitles(id, params as TitleParams, runCount);
+          break;
+        case 'promo_short':
+          result = this.generatePromoShorts(id, params as PromoShortParams, runCount);
+          break;
+        case 'long_form':
+          result = this.generateLongForms(id, params as LongFormParams, runCount);
+          break;
+        case 'tone_adjust':
+          result = this.generateToneAdjusts(id, params as ToneAdjustParams, runCount);
+          break;
+        default:
+          result = { id, candidates: [] };
+      }
+
+      rawGeneratedCount += result.candidates.length;
+
+      const candidatesWithPool = result.candidates.map((c, idx) => ({
+        ...c,
+        poolInfo: c.poolInfo || this.classifyPoolStyle(c.content, type, idx + attempts * 100, poolConfig),
+      }));
+
+      const poolResult = this.applyPoolConfig(candidatesWithPool, poolConfig);
+      allFiltered.push(...poolResult.filtered);
+
+      const existingContents = new Set(keptCandidates.map(c => c.content));
+      for (const c of poolResult.kept) {
+        if (!existingContents.has(c.content) && keptCandidates.length < targetCount * 2) {
+          keptCandidates.push(c);
+          existingContents.add(c.content);
+        }
+      }
+
+      attempts++;
     }
 
-    const candidatesWithPool = result.candidates.map((c, idx) => ({
-      ...c,
-      poolInfo: c.poolInfo || this.classifyPoolStyle(c.content, type, idx),
-    }));
+    if (keptCandidates.length > targetCount) {
+      if (poolConfig?.preferredStyles && poolConfig.preferredStyles.length > 0) {
+        const preferred = new Set(poolConfig.preferredStyles);
+        keptCandidates.sort((a, b) => {
+          const aPref = a.poolInfo && preferred.has(a.poolInfo.style) ? 1 : 0;
+          const bPref = b.poolInfo && preferred.has(b.poolInfo.style) ? 1 : 0;
+          if (bPref !== aPref) return bPref - aPref;
+          return b.score - a.score;
+        });
+      } else {
+        keptCandidates.sort((a, b) => b.score - a.score);
+      }
+      keptCandidates = keptCandidates.slice(0, targetCount);
+    }
 
-    const filtered = this.applyPoolConfig(candidatesWithPool, params.poolConfig);
-
-    if (params.poolConfig?.disabledPatterns && params.poolConfig.disabledPatterns.length > 0) {
-      const patterns = params.poolConfig.disabledPatterns;
-      const finalCandidates = filtered.filter(c =>
-        !patterns.some(p => c.content.includes(p))
-      );
-      if (finalCandidates.length > 0) {
-        return { id: result.id, candidates: finalCandidates };
+    if (keptCandidates.length < targetCount) {
+      const seenContents = new Set(keptCandidates.map(c => c.content));
+      const fallbackCandidates = this.generateFallbackCandidates(type, params, targetCount - keptCandidates.length, keptCandidates.length, poolConfig);
+      for (const fc of fallbackCandidates) {
+        if (!seenContents.has(fc.content)) {
+          keptCandidates.push(fc);
+          seenContents.add(fc.content);
+        }
+      }
+      if (keptCandidates.length < targetCount) {
+        const existing = [...keptCandidates];
+        let i = 0;
+        while (keptCandidates.length < targetCount && existing.length > 0) {
+          const src = existing[i % existing.length];
+          const variation = this.createVariation(src, keptCandidates.length, poolConfig);
+          keptCandidates.push(variation);
+          i++;
+        }
       }
     }
 
-    return { id: result.id, candidates: filtered };
+    return {
+      id,
+      candidates: keptCandidates.slice(0, targetCount),
+      filteredCandidates: allFiltered,
+      rawGeneratedCount,
+    };
+  }
+
+  private generateFallbackCandidates(
+    type: CopyType,
+    params: BaseGenerateParams,
+    count: number,
+    startIndex: number,
+    poolConfig?: PoolConfig
+  ): Array<{ content: string; score: number; tags: string[]; poolInfo?: CandidatePoolSource }> {
+    const product = params.productInfo;
+    const productName = product?.name || '商品';
+    const brand = product?.brand || '';
+    const keywords = params.keywords || [];
+    const kwStr = keywords.length > 0 ? ' ' + keywords.join(' ') : '';
+    const preferredStyle = poolConfig?.preferredStyles?.[0];
+
+    const templates: Record<string, string[]> = {
+      title: [
+        `${brand ? brand + ' ' : ''}${productName}${kwStr}`,
+        `${productName}${brand ? ' ' + brand : ''}${kwStr} - 品质之选`,
+        `【品质推荐】${brand ? brand + ' ' : ''}${productName}${kwStr}`,
+        `${productName}${kwStr}｜${brand ? brand : '精选好物'}`,
+        `${brand ? brand + '：' : ''}${productName}${kwStr}`,
+      ],
+      promo_short: [
+        `${productName}限时特惠${kwStr}，品质好货不容错过！`,
+        `热销推荐：${brand ? brand + ' ' : ''}${productName}${kwStr}`,
+        `${productName}${kwStr} 限时优惠中`,
+        `好价来袭：${productName}${kwStr}`,
+        `${brand ? brand + ' ' : ''}${productName}${kwStr} 精选特惠`,
+      ],
+      selling_point: [
+        `${productName}核心优势：${keywords.join('、') || '品质卓越'}`,
+        `选择${productName}的理由：${keywords.join('、') || '品质保障'}`,
+        `${productName}亮点：${keywords.join('、') || '性价比高'}`,
+      ],
+      long_form: [
+        `${productName}是${brand ? brand + '旗下' : '一款'}值得推荐的好产品。${keywords.length > 0 ? '主打' + keywords.join('、') + '，' : ''}在${product?.usageScenarios?.join('、') || '多种场景'}下都能提供出色体验。`,
+        `为什么推荐${productName}？因为它${keywords.length > 0 ? '具备' + keywords.join('、') + '等优势，' : '品质过硬，'}能够满足${product?.targetAudience ? '目标用户' : '大多数用户'}的核心需求。`,
+        `使用${productName}，${keywords.length > 0 ? '感受' + keywords.join('、') + '带来的' : ''}全新体验，让生活更美好。`,
+      ],
+      tone_adjust: [
+        `${productName}${kwStr} 优质推荐`,
+      ],
+    };
+
+    const pool = templates[type] || templates.title;
+    const result: Array<{ content: string; score: number; tags: string[]; poolInfo?: CandidatePoolSource }> = [];
+
+    for (let i = 0; i < count; i++) {
+      const content = pool[(startIndex + i) % pool.length];
+      const poolInfo = this.classifyPoolStyle(content, type, startIndex + i + 1000, poolConfig);
+      if (preferredStyle && poolInfo.style !== preferredStyle && poolConfig?.strictMode) {
+        poolInfo.style = preferredStyle;
+        poolInfo.poolName = this.getPoolNameByStyle(preferredStyle);
+        poolInfo.selectedReason = '按偏好风格定向生成补位；' + poolInfo.selectedReason;
+        poolInfo.isPreferred = true;
+      }
+      result.push({
+        content,
+        score: 0.7,
+        tags: keywords.slice(),
+        poolInfo,
+      });
+    }
+    return result;
+  }
+
+  private getPoolNameByStyle(style: PoolStyle): string {
+    const map: Record<PoolStyle, string> = {
+      official: '官方旗舰池',
+      bestseller: '爆款热卖池',
+      grassroots: '种草分享池',
+      promotion: '促销优惠池',
+      emotional: '情感共鸣池',
+      professional: '专业技术池',
+      youthful: '年轻潮流池',
+      luxury: '奢华高端池',
+    };
+    return map[style] || '通用池';
+  }
+
+  private createVariation(
+    src: { content: string; score: number; tags: string[]; poolInfo?: CandidatePoolSource },
+    idx: number,
+    poolConfig?: PoolConfig
+  ): { content: string; score: number; tags: string[]; poolInfo?: CandidatePoolSource } {
+    const prefixes = ['✨ ', '★ ', '『', '【精选】', '【推荐】'];
+    const suffixes = [' ♥', ' ✓', '』', ' - 品质优选', ' - 精选推荐'];
+    const variants = [
+      prefixes[idx % prefixes.length] + src.content,
+      src.content + suffixes[idx % suffixes.length],
+      prefixes[(idx + 1) % prefixes.length] + src.content + suffixes[(idx + 1) % suffixes.length],
+    ];
+    const content = variants[idx % variants.length];
+    return {
+      content,
+      score: src.score * 0.95,
+      tags: [...src.tags],
+      poolInfo: src.poolInfo,
+    };
   }
 
   // ===== 卖点生成：支持大量候选（20+） =====

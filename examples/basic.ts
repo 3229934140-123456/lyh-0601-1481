@@ -617,6 +617,208 @@ async function main() {
   }
   console.log('');
 
+  // ========== 23. 候选池严格可控生成 ==========
+  console.log('23. 候选池严格可控生成（偏好风格+禁用+严格模式）');
+
+  console.log('  【偏好官方风 + 禁用促销/爆款风】');
+  const strictTitles = await sdk.generateTitles({
+    productInfo: product,
+    candidateCount: 5,
+    seed: 42,
+    poolConfig: {
+      preferredStyles: ['official', 'grassroots'],
+      disabledStyles: ['promotion', 'bestseller'],
+    },
+  });
+  const styleDist1: Record<string, number> = {};
+  strictTitles.forEach(c => {
+    const s = c.poolInfo?.style || 'unknown';
+    styleDist1[s] = (styleDist1[s] || 0) + 1;
+  });
+  console.log(`    风格分布: ${JSON.stringify(styleDist1)}`);
+  console.log(`    是否混入禁用风格(promotion/bestseller): ${
+    strictTitles.some(c => c.poolInfo?.style === 'promotion' || c.poolInfo?.style === 'bestseller') ? '❌是' : '✅否'
+  }`);
+  console.log(`    偏好风格(official/grassroots)占比: ${
+    Math.round(strictTitles.filter(c => c.poolInfo?.isPreferred).length / strictTitles.length * 100)
+  }%`);
+  strictTitles.slice(0, 3).forEach((c, i) => {
+    console.log(`      ${i + 1}. [${c.poolInfo?.poolName}${c.poolInfo?.isPreferred ? '★偏好' : ''}] ${c.content.substring(0, 35)}...`);
+  });
+
+  console.log('  【禁用套路："闭眼入"、"必入" + 自动补足足量】');
+  const noPatternTitles2 = await sdk.generateTitles({
+    productInfo: product,
+    candidateCount: 6,
+    seed: 42,
+    poolConfig: {
+      disabledPatterns: ['闭眼入', '必入'],
+    },
+  });
+  const hitBad = noPatternTitles2.some(c => c.content.includes('闭眼入') || c.content.includes('必入'));
+  console.log(`    6条中是否仍有禁用套路: ${hitBad ? '❌是' : '✅否'}`);
+  console.log(`    实际返回数量: ${noPatternTitles2.length} (要求6条) ${noPatternTitles2.length === 6 ? '✅足量' : '❌不足'}`);
+
+  console.log('  【strictMode：只保留官方+种草风，其他全部过滤并补足】');
+  const strictOnlyTitles = await sdk.generateTitles({
+    productInfo: product,
+    candidateCount: 4,
+    seed: 42,
+    poolConfig: {
+      preferredStyles: ['official', 'grassroots'],
+      strictMode: true,
+    },
+  });
+  const allPref = strictOnlyTitles.every(c => c.poolInfo?.style === 'official' || c.poolInfo?.style === 'grassroots');
+  console.log(`    严格模式后全部命中偏好风格: ${allPref ? '✅是' : '❌否'}`);
+  console.log(`    返回数量: ${strictOnlyTitles.length} (要求4条) ${strictOnlyTitles.length === 4 ? '✅足量' : '❌不足'}`);
+  console.log('');
+
+  // ========== 24. 整组文案投放决策（主推/备选/淘汰 + 适配渠道） ==========
+  console.log('24. 整组文案投放决策（自动分档+渠道推荐）');
+
+  const tenderResult = await sdk.generateAdvanced('title', {
+    productInfo: product,
+    candidateCount: 8,
+    seed: 42,
+    keywords: ['降噪', '蓝牙', '耳机'],
+  }, {
+    enableQualityCheck: true,
+    enableSorting: true,
+    returnTenderDecisions: true,
+  });
+
+  const byTier: Record<string, typeof tenderResult.candidates> = { main_push: [], backup: [], eliminated: [] };
+  tenderResult.candidates.forEach(c => {
+    const t = c.tenderDecision?.tier || 'backup';
+    if (byTier[t]) byTier[t].push(c);
+  });
+
+  console.log(`  分档结果: 主推${byTier.main_push.length}条 / 备选${byTier.backup.length}条 / 淘汰${byTier.eliminated.length}条`);
+  console.log('');
+
+  byTier.main_push.slice(0, 2).forEach((c, i) => {
+    const td = c.tenderDecision!;
+    console.log(`  🎯 主推 #${i + 1}: ${c.content.substring(0, 40)}...`);
+    console.log(`     综合分: ${((c.qualityReportV2?.overallScore ?? c.score ?? 0) * 100).toFixed(0)}分  |  首选渠道: ${td.primaryChannelName}(${Math.round(td.primaryChannelFit * 100)}%)`);
+    console.log(`     适配渠道: ${td.suitableChannels.map(sc => `${sc.scenarioName}(${Math.round(sc.fitScore * 100)}%)`).join('、')}`);
+    console.log(`     决策依据: ${td.decisionReason.slice(0, 3).join('；')}`);
+  });
+  console.log('');
+
+  byTier.backup.slice(0, 2).forEach((c, i) => {
+    const td = c.tenderDecision!;
+    console.log(`  📋 备选 #${i + 1}: ${c.content.substring(0, 40)}...`);
+    console.log(`     首选渠道: ${td.primaryChannelName}(${Math.round(td.primaryChannelFit * 100)}%)  |  适配: ${td.suitableChannels.slice(0, 2).map(sc => sc.scenarioName).join('、')}`);
+  });
+  console.log('');
+
+  if (byTier.eliminated.length > 0) {
+    byTier.eliminated.slice(0, 2).forEach((c, i) => {
+      const td = c.tenderDecision!;
+      console.log(`  ❌ 淘汰 #${i + 1}: ${c.content.substring(0, 40)}...`);
+      console.log(`     原因: ${td.decisionReason.join('；')}`);
+    });
+  }
+  console.log('');
+
+  // ========== 25. 可复现追踪信息（seed+过滤详情+排序依据） ==========
+  console.log('25. 可复现追踪信息（A/B 测试回放）');
+
+  const traceResult = await sdk.generateAdvanced('title', {
+    productInfo: product,
+    candidateCount: 5,
+    seed: 42,
+    keywords: ['降噪', '蓝牙', '耳机'],
+    poolConfig: {
+      preferredStyles: ['official', 'grassroots'],
+      disabledPatterns: ['闭眼入'],
+    },
+  }, {
+    returnTrace: true,
+    enableDeduplication: true,
+    enableSorting: true,
+    enableQualityCheck: true,
+    autoRefillOnFilter: true,
+  });
+
+  const trace = traceResult.trace!;
+  console.log(`  📌 seed: ${trace.seed}`);
+  console.log(`  📌 目标数量: ${trace.targetCount}  实际返回: ${traceResult.candidates.length}`);
+  console.log(`  📌 原始生成: ${trace.rawGeneratedCount}条  |  补位数量: ${trace.refillCount}条`);
+  console.log(`  📌 过滤统计: 池过滤${trace.poolFilteredCount}条 / 去重${trace.deduplicationRemovedCount}条 / 质量${trace.qualityFilteredCount}条 / 敏感词${trace.sensitiveFilteredCount}条 / 长度${trace.lengthFilteredCount}条 / 关键词${trace.keywordFilteredCount}条`);
+  console.log(`  📌 排序依据: ${trace.rankingBasis.join(' / ')}`);
+  console.log(`  📌 偏好风格分布: ${JSON.stringify(trace.styleDistribution)}`);
+  console.log(`  📌 耗时: ${trace.generationTimeMs}ms`);
+  console.log('');
+  if (trace.filteredCandidates.length > 0) {
+    console.log(`  🔍 被过滤的候选示例（前3条）:`);
+    trace.filteredCandidates.slice(0, 3).forEach((f, i) => {
+      console.log(`     ${i + 1}. [${f.filterType}] ${f.filterReason}`);
+      console.log(`        内容: ${f.content.substring(0, 35)}...`);
+    });
+  }
+  console.log('');
+
+  // ========== 26. 过滤后稳定输出（敏感词+质量+长度+关键词多层过滤自动补位） ==========
+  console.log('26. 过滤后稳定输出（多层过滤自动补位保证数量和长度）');
+
+  console.log('  【全开严格过滤：质量阈值0.8 + 关键词全覆盖 + 长度10~25字 + 敏感词】');
+  const robustTitles = await sdk.generateAdvanced('title', {
+    productInfo: product,
+    candidateCount: 6,
+    seed: 42,
+    keywords: ['降噪', '蓝牙'],
+    lengthLimit: { min: 10, max: 25 },
+  }, {
+    autoRefillOnFilter: true,
+    strictPoolFilter: true,
+    enableQualityCheck: true,
+    enableSensitiveCheck: true,
+    enableDeduplication: true,
+    enableSorting: true,
+    qualityThreshold: 0.7,
+    returnTrace: true,
+  });
+  const rt = robustTitles.trace!;
+  const allCountOk = robustTitles.candidates.length === 6;
+  const allLenOk = robustTitles.candidates.every(c => {
+    const l = Array.from(c.content).length;
+    return l >= 10 && l <= 25;
+  });
+  const allKwOk = robustTitles.candidates.every(c =>
+    c.content.includes('降噪') || c.content.includes('蓝牙')
+  );
+
+  console.log(`    ✅ 数量: ${robustTitles.candidates.length} / 6 ${allCountOk ? '达标' : '不足'}`);
+  console.log(`    ✅ 长度合规(10~25字): ${allLenOk ? '全部达标' : '有违规'}`);
+  robustTitles.candidates.forEach((c, i) => {
+    const l = Array.from(c.content).length;
+    console.log(`       #${i + 1} ${l}字: ${c.content.substring(0, 30)}...`);
+  });
+  console.log(`    ✅ 关键词覆盖(降噪/蓝牙): ${allKwOk ? '全部覆盖' : '有缺失'}`);
+  console.log(`    ✅ 过滤补位记录: 质量${rt.qualityFilteredCount} / 长度${rt.lengthFilteredCount} / 关键词${rt.keywordFilteredCount} / 去重${rt.deduplicationRemovedCount} / 补位${rt.refillCount}`);
+  console.log('');
+
+  console.log('  【长文扩写：多层过滤后严格返回 5 条】');
+  const robustLong = await sdk.generateAdvanced('long_form', {
+    productInfo: product,
+    candidateCount: 5,
+    seed: 42,
+    keywords: ['降噪', '蓝牙'],
+  }, {
+    autoRefillOnFilter: true,
+    enableDeduplication: true,
+    enableQualityCheck: true,
+    enableSorting: true,
+    qualityThreshold: 0.6,
+    returnTrace: true,
+  });
+  const rlt = robustLong.trace!;
+  console.log(`    ✅ 长文数量: ${robustLong.candidates.length} / 5 ${robustLong.candidates.length === 5 ? '达标' : '不足'}`);
+  console.log(`    ✅ 过滤补位记录: 池${rlt.poolFilteredCount} / 去重${rlt.deduplicationRemovedCount} / 质量${rlt.qualityFilteredCount} / 补位${rlt.refillCount}`);
+
+  console.log('');
   console.log('=== 全部增强功能演示完成 ===');
 }
 
