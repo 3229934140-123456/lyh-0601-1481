@@ -10,6 +10,10 @@ import type {
   BatchQualityReport,
   SimilarityGroup,
   RankedCandidate,
+  ScenarioRecommendation,
+  UsageScenario,
+  QualityReportV2,
+  CandidatePoolSource,
 } from './types';
 
 export function checkLength(text: string, limit?: LengthLimit): LengthCheckResult {
@@ -566,6 +570,198 @@ export function generateBatchQualityReport(
   };
 }
 
+export function recommendUsageScenarios(
+  text: string,
+  options: {
+    qualityReport?: QualityReport;
+    productInfo?: ProductInfo;
+    copyType?: string;
+  } = {}
+): ScenarioRecommendation[] {
+  const len = Array.from(text).length;
+  const hasEmoji = /[\u{1F300}-\u{1F9FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}]/u.test(text);
+  const hasPrice = /\d+元|￥\d+|¥\d+|\d+块|\d+折/.test(text);
+  const hasUrgency = /限时|限量|仅剩|最后|赶紧|快抢|手慢|倒计时|即将结束/.test(text);
+  const hasBrand = options.productInfo?.brand ? text.includes(options.productInfo.brand) : /品牌|官方|正品/.test(text);
+  const hasBenefit = /效果|好用|推荐|值得|性价比|神器|绝了/.test(text);
+  const hasCTA = /点击|立即|马上|赶紧|下单|购买|抢购|快来/.test(text);
+  const hasTopicTag = /#|＃/.test(text);
+  const hasProductName = options.productInfo?.name ? text.includes(options.productInfo.name) : false;
+  const formalScore = /专业|品质|精选|臻选|官方|品牌|正品/.test(text) ? 1 : 0;
+
+  const scenarios: Array<{
+    scenario: UsageScenario;
+    name: string;
+    score: number;
+    reason: string;
+  }> = [
+    {
+      scenario: 'search_title',
+      name: '搜索标题',
+      score: 0,
+      reason: '',
+    },
+    {
+      scenario: 'detail_hero',
+      name: '详情页首屏',
+      score: 0,
+      reason: '',
+    },
+    {
+      scenario: 'sms_promo',
+      name: '短信促销',
+      score: 0,
+      reason: '',
+    },
+    {
+      scenario: 'social_grass',
+      name: '社媒种草',
+      score: 0,
+      reason: '',
+    },
+    {
+      scenario: 'live_stream',
+      name: '直播话术',
+      score: 0,
+      reason: '',
+    },
+    {
+      scenario: 'email_marketing',
+      name: '邮件营销',
+      score: 0,
+      reason: '',
+    },
+    {
+      scenario: 'banner_ad',
+      name: 'Banner广告',
+      score: 0,
+      reason: '',
+    },
+    {
+      scenario: 'push_notification',
+      name: 'Push推送',
+      score: 0,
+      reason: '',
+    },
+  ];
+
+  for (const s of scenarios) {
+    const reasons: string[] = [];
+    let score = 0;
+
+    switch (s.scenario) {
+      case 'search_title':
+        if (len >= 12 && len <= 30) { score += 30; reasons.push('长度适配搜索展示'); }
+        if (hasProductName) { score += 25; reasons.push('包含完整商品名'); }
+        if (hasBrand) { score += 15; reasons.push('包含品牌词'); }
+        if (options.qualityReport?.keywords.inclusionRate ?? 0 >= 0.5) { score += 20; reasons.push('关键词覆盖好'); }
+        if (!hasEmoji && !hasTopicTag) { score += 10; reasons.push('风格正式适合搜索'); }
+        break;
+
+      case 'detail_hero':
+        if (len >= 40 && len <= 120) { score += 30; reasons.push('长度适配首屏展示'); }
+        if (hasProductName) { score += 20; reasons.push('点明产品主体'); }
+        if (hasBenefit) { score += 20; reasons.push('包含卖点利益点'); }
+        if (hasBrand) { score += 15; reasons.push('有品牌背书'); }
+        if (formalScore > 0) { score += 15; reasons.push('风格专业正式'); }
+        break;
+
+      case 'sms_promo':
+        if (len >= 30 && len <= 70) { score += 25; reasons.push('长度适配短信字数'); }
+        if (hasPrice) { score += 30; reasons.push('包含价格/优惠'); }
+        if (hasUrgency) { score += 25; reasons.push('有紧迫感促转化'); }
+        if (hasCTA) { score += 20; reasons.push('有行动号召'); }
+        break;
+
+      case 'social_grass':
+        if (hasEmoji) { score += 25; reasons.push('有表情符号更活泼'); }
+        if (hasTopicTag) { score += 20; reasons.push('有话题标签易传播'); }
+        if (hasBenefit) { score += 20; reasons.push('有使用/效果分享感'); }
+        if (len >= 20 && len <= 80) { score += 20; reasons.push('长度适合社交媒体'); }
+        if (/我|我们|安利|种草|绝绝子|yyds|谁懂/.test(text)) { score += 15; reasons.push('口语化有分享感'); }
+        break;
+
+      case 'live_stream':
+        if (hasUrgency) { score += 30; reasons.push('紧迫感强适合直播'); }
+        if (hasPrice) { score += 25; reasons.push('带价格促下单'); }
+        if (hasCTA) { score += 25; reasons.push('有行动号召'); }
+        if (len >= 15 && len <= 50) { score += 20; reasons.push('短句适合口播'); }
+        break;
+
+      case 'email_marketing':
+        if (len >= 60 && len <= 200) { score += 30; reasons.push('篇幅适合邮件阅读'); }
+        if (formalScore > 0) { score += 25; reasons.push('语气正式专业'); }
+        if (hasBrand) { score += 20; reasons.push('品牌感强'); }
+        if (hasProductName) { score += 15; reasons.push('产品信息清晰'); }
+        if (/尊敬|亲爱的|您好|感谢|致/.test(text)) { score += 10; reasons.push('有称谓/问候语'); }
+        break;
+
+      case 'banner_ad':
+        if (len >= 8 && len <= 25) { score += 35; reasons.push('短句适合Banner'); }
+        if (hasBenefit || hasPrice) { score += 30; reasons.push('有核心卖点/利益点'); }
+        if (hasBrand) { score += 20; reasons.push('品牌露出'); }
+        if (hasUrgency) { score += 15; reasons.push('有吸引眼球的信息'); }
+        break;
+
+      case 'push_notification':
+        if (len >= 6 && len <= 24) { score += 35; reasons.push('长度适配推送展示'); }
+        if (hasUrgency || hasBenefit) { score += 30; reasons.push('有吸引力促点击'); }
+        if (hasPrice) { score += 20; reasons.push('价格敏感点强'); }
+        if (!/。|\.|\n/.test(text)) { score += 15; reasons.push('简洁不拖沓'); }
+        break;
+    }
+
+    s.score = Math.min(100, score);
+    s.reason = reasons.length > 0 ? reasons.join('；') : '综合评分';
+  }
+
+  return scenarios
+    .filter(s => s.score >= 20)
+    .sort((a, b) => b.score - a.score)
+    .map(s => ({
+      scenario: s.scenario,
+      fitScore: Math.round(s.score) / 100,
+      reason: s.reason,
+    }));
+}
+
+export function generateQualityReportV2(
+  candidate: CopyCandidate,
+  options: {
+    lengthLimit?: LengthLimit;
+    keywords?: string[];
+    productInfo?: ProductInfo;
+    allCandidates?: CopyCandidate[];
+    duplicateThreshold?: number;
+    copyType?: string;
+  } = {}
+): QualityReportV2 {
+  const base = generateQualityReport(candidate, options);
+
+  const scenarios = recommendUsageScenarios(candidate.content, {
+    qualityReport: base,
+    productInfo: options.productInfo,
+    copyType: options.copyType,
+  });
+
+  const rankingBasis: string[] = [];
+  if (base.overallScore >= 0.8) rankingBasis.push('综合质量分高');
+  if (base.keywords.allIncluded) rankingBasis.push('关键词全部覆盖');
+  else if (base.keywords.inclusionRate >= 0.5) rankingBasis.push(`关键词覆盖率${Math.round(base.keywords.inclusionRate * 100)}%`);
+  if (base.length.valid) rankingBasis.push('长度合规');
+  if (base.coreInfo.completeness >= 0.75) rankingBasis.push('核心信息完整');
+  if (!base.isDuplicate) rankingBasis.push('内容独特无重复');
+  if (!candidate.hasSensitive) rankingBasis.push('无敏感词风险');
+  if (candidate.wasTruncated) rankingBasis.push('已按长度上限截断');
+
+  return {
+    ...base,
+    recommendScenarios: scenarios,
+    rankingBasis,
+    poolInfo: candidate.poolInfo,
+  };
+}
+
 export class QualityChecker {
   private defaultLengthLimit?: LengthLimit;
   private duplicateThreshold: number = 0.85;
@@ -661,5 +857,51 @@ export class QualityChecker {
 
   public findSimilarGroups(candidates: CopyCandidate[], threshold = 0.6): SimilarityGroup[] {
     return findSimilarGroups(candidates, threshold);
+  }
+
+  public recommendScenarios(
+    text: string,
+    options?: {
+      qualityReport?: QualityReport;
+      productInfo?: ProductInfo;
+      copyType?: string;
+    }
+  ): ScenarioRecommendation[] {
+    return recommendUsageScenarios(text, options);
+  }
+
+  public generateReportV2(
+    candidate: CopyCandidate,
+    options: {
+      lengthLimit?: LengthLimit;
+      keywords?: string[];
+      productInfo?: ProductInfo;
+      allCandidates?: CopyCandidate[];
+      copyType?: string;
+    } = {}
+  ): QualityReportV2 {
+    return generateQualityReportV2(candidate, {
+      ...options,
+      duplicateThreshold: this.duplicateThreshold,
+    });
+  }
+
+  public generateAllReportsV2(
+    candidates: CopyCandidate[],
+    options: {
+      lengthLimit?: LengthLimit;
+      keywords?: string[];
+      productInfo?: ProductInfo;
+      copyType?: string;
+    } = {}
+  ): CopyCandidate[] {
+    return candidates.map((candidate) => ({
+      ...candidate,
+      qualityReportV2: generateQualityReportV2(candidate, {
+        ...options,
+        allCandidates: candidates,
+        duplicateThreshold: this.duplicateThreshold,
+      }),
+    }));
   }
 }

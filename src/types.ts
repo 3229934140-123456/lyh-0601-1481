@@ -64,8 +64,10 @@ export type CopyCandidate = {
   sensitiveWords: SensitiveWordMatch[];
   hasSensitive: boolean;
   qualityReport?: QualityReport;
+  qualityReportV2?: QualityReportV2;
   wasTruncated: boolean;
   truncateInfo?: TruncateResult;
+  poolInfo?: CandidatePoolSource;
   createdAt: number;
   metadata?: Record<string, unknown>;
 };
@@ -118,7 +120,56 @@ export type BaseGenerateParams = {
   excludeKeywords?: string[];
   referenceCopy?: string;
   language?: string;
+  seed?: number;
+  poolConfig?: PoolConfig;
   extraParams?: Record<string, unknown>;
+};
+
+export type PoolStyle =
+  | 'official'
+  | 'bestseller'
+  | 'grassroots'
+  | 'promotion'
+  | 'emotional'
+  | 'professional'
+  | 'youthful'
+  | 'luxury';
+
+export type PoolConfig = {
+  preferredStyles?: PoolStyle[];
+  disabledStyles?: PoolStyle[];
+  disabledPatterns?: string[];
+  weightByStyle?: Partial<Record<PoolStyle, number>>;
+};
+
+export type CandidatePoolSource = {
+  poolId: string;
+  poolName: string;
+  style: PoolStyle;
+  matchScore: number;
+  selectedReason: string;
+};
+
+export type UsageScenario =
+  | 'search_title'
+  | 'detail_hero'
+  | 'sms_promo'
+  | 'social_grass'
+  | 'live_stream'
+  | 'email_marketing'
+  | 'banner_ad'
+  | 'push_notification';
+
+export type ScenarioRecommendation = {
+  scenario: UsageScenario;
+  fitScore: number;
+  reason: string;
+};
+
+export type QualityReportV2 = QualityReport & {
+  recommendScenarios: ScenarioRecommendation[];
+  rankingBasis: string[];
+  poolInfo?: CandidatePoolSource;
 };
 
 export type SellingPointParams = BaseGenerateParams & {

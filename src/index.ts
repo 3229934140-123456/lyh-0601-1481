@@ -270,6 +270,42 @@ export class CopySDK {
     return findSimilarGroupsUtil(candidates, threshold);
   }
 
+  public generateQualityReportV2(
+    candidate: CopyCandidate,
+    options: {
+      lengthLimit?: LengthLimit;
+      keywords?: string[];
+      productInfo?: ProductInfo;
+      allCandidates?: CopyCandidate[];
+      copyType?: string;
+    } = {}
+  ): import('./types').QualityReportV2 {
+    return this.qualityChecker.generateReportV2(candidate, options);
+  }
+
+  public generateQualityReportsV2(
+    candidates: CopyCandidate[],
+    options: {
+      lengthLimit?: LengthLimit;
+      keywords?: string[];
+      productInfo?: ProductInfo;
+      copyType?: string;
+    } = {}
+  ): CopyCandidate[] {
+    return this.qualityChecker.generateAllReportsV2(candidates, options);
+  }
+
+  public recommendUsageScenarios(
+    text: string,
+    options?: {
+      qualityReport?: QualityReport;
+      productInfo?: ProductInfo;
+      copyType?: string;
+    }
+  ): import('./types').ScenarioRecommendation[] {
+    return this.qualityChecker.recommendScenarios(text, options);
+  }
+
   public truncateText(text: string, limit: LengthLimit): string {
     return truncateTextUtil(text, limit);
   }

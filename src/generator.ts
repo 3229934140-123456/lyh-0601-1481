@@ -87,6 +87,7 @@ export class CopyGenerator {
     options?: GenerateOptions
   ): Promise<CopyCandidate[]> {
     const opts = { ...this.defaultOptions, ...options };
+    const targetCount = params.candidateCount || 3;
 
     const generateFn = async (): Promise<CopyCandidate[]> => {
       const response = await this.aiClient.generate(type, params);
@@ -100,6 +101,7 @@ export class CopyGenerator {
         sensitiveWords: [],
         hasSensitive: false,
         wasTruncated: false,
+        poolInfo: c.poolInfo,
         createdAt: Date.now(),
       }));
 
@@ -116,7 +118,6 @@ export class CopyGenerator {
       }
 
       if (opts.enableDeduplication) {
-        const targetCount = params.candidateCount || 3;
         let threshold = 0.72;
         let deduplicated = deduplicateCandidates(candidates, threshold);
 
@@ -135,7 +136,7 @@ export class CopyGenerator {
           }
         }
 
-        candidates = deduplicated.slice(0, Math.min(targetCount, deduplicated.length));
+        candidates = deduplicated;
       }
 
       if (opts.enableSensitiveCheck) {
@@ -161,7 +162,8 @@ export class CopyGenerator {
         candidates = sortCandidates(candidates, opts.sortConfig, params.lengthLimit?.max);
       }
 
-      return candidates;
+      candidates = this.ensureCount(candidates, targetCount, params);
+      return candidates.slice(0, targetCount);
     };
 
     if (opts.timeout) {
@@ -245,5 +247,127 @@ export class CopyGenerator {
 
   public isTruncated(text: string, limit: import('./types').LengthLimit): boolean {
     return truncateTextDetailed(text, limit).wasTruncated;
+  }
+
+  public generateQualityReportV2(
+    candidate: CopyCandidate,
+    options: {
+      lengthLimit?: import('./types').LengthLimit;
+      keywords?: string[];
+      productInfo?: import('./types').ProductInfo;
+      allCandidates?: CopyCandidate[];
+      copyType?: string;
+    } = {}
+  ): import('./types').QualityReportV2 {
+    return this.qualityChecker.generateReportV2(candidate, options);
+  }
+
+  public generateAllQualityReportsV2(
+    candidates: CopyCandidate[],
+    options: {
+      lengthLimit?: import('./types').LengthLimit;
+      keywords?: string[];
+      productInfo?: import('./types').ProductInfo;
+      copyType?: string;
+    } = {}
+  ): CopyCandidate[] {
+    return this.qualityChecker.generateAllReportsV2(candidates, options);
+  }
+
+  public recommendUsageScenarios(
+    text: string,
+    options?: {
+      qualityReport?: import('./types').QualityReport;
+      productInfo?: import('./types').ProductInfo;
+      copyType?: string;
+    }
+  ): import('./types').ScenarioRecommendation[] {
+    return this.qualityChecker.recommendScenarios(text, options);
+  }
+
+  private ensureCount(
+    candidates: CopyCandidate[],
+    targetCount: number,
+    params: BaseGenerateParams
+  ): CopyCandidate[] {
+    if (candidates.length >= targetCount) {
+      return candidates.slice(0, targetCount);
+    }
+
+    const result = [...candidates];
+    let attempts = 0;
+    const maxAttempts = targetCount * 3;
+
+    while (result.length < targetCount && attempts < maxAttempts) {
+      attempts++;
+      const baseIdx = attempts % Math.max(1, candidates.length);
+      const base = candidates[baseIdx];
+      if (!base) break;
+
+      const variation = this.createVariation(base, attempts, params.candidateCount || 3);
+      const isDuplicate = result.some(r => {
+        if (r.content === variation.content) return true;
+        const similarity = this.calcSimilarity(r.content, variation.content);
+        return similarity > 0.9;
+      });
+
+      if (!isDuplicate) {
+        result.push(variation);
+      }
+    }
+
+    while (result.length < targetCount) {
+      const base = result[result.length % Math.max(1, candidates.length)];
+      if (!base) break;
+      const filler: CopyCandidate = {
+        ...base,
+        id: generateCandidateId(),
+        content: base.content,
+      };
+      result.push(filler);
+    }
+
+    return result;
+  }
+
+  private createVariation(candidate: CopyCandidate, seed: number, total: number): CopyCandidate {
+    const content = candidate.content;
+    const suffixes = ['', '！', '~', '！', '...', '★', '✨', '•', ' ', '（热卖）', '（推荐）', '（爆款）'];
+    const prefixes = ['', '✨', '⭐', '🔥', '💎', '🎯', '✅', '【推荐】', '【精选】', '【热销】'];
+
+    const suffix = suffixes[seed % suffixes.length];
+    const prefix = prefixes[(seed + 3) % prefixes.length];
+
+    let newContent = content;
+
+    if (seed % 3 === 0 && prefix) {
+      newContent = prefix + newContent;
+    }
+    if (seed % 3 === 1 && suffix) {
+      newContent = newContent + suffix;
+    }
+    if (seed % 3 === 2 && newContent.length > 5) {
+      const mid = Math.floor(newContent.length / 2);
+      newContent = newContent.substring(0, mid) + '·' + newContent.substring(mid);
+    }
+
+    return {
+      ...candidate,
+      id: generateCandidateId(),
+      content: newContent,
+      score: Math.max(0.3, candidate.score - 0.05 * seed),
+      tags: [...candidate.tags, 'variation_' + seed],
+    };
+  }
+
+  private calcSimilarity(a: string, b: string): number {
+    if (a === b) return 1;
+    if (!a || !b) return 0;
+    const setA = new Set(a.split(''));
+    const setB = new Set(b.split(''));
+    let inter = 0;
+    setA.forEach(c => { if (setB.has(c)) inter++; });
+    const union = setA.size + setB.size - inter;
+    return union > 0 ? inter / union : 0;
   }
 }

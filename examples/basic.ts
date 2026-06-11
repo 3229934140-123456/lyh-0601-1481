@@ -471,6 +471,152 @@ async function main() {
   });
   console.log('');
 
+  // ========== 19. 可复现生成（相同 seed 稳定一致） ==========
+  console.log('19. 可复现生成验证（相同 seed 返回相同结果）');
+  const seed = 42;
+
+  const run1 = await sdk.generateTitles({
+    productInfo: product,
+    candidateCount: 5,
+    seed,
+    keywords: ['降噪', '蓝牙', '耳机'],
+  });
+
+  const run2 = await sdk.generateTitles({
+    productInfo: product,
+    candidateCount: 5,
+    seed,
+    keywords: ['降噪', '蓝牙', '耳机'],
+  });
+
+  const sameOrder = run1.every((c, i) => c.content === run2[i].content);
+  console.log(`  两次调用（相同 seed=42）：${sameOrder ? '✅结果完全一致' : '❌结果不一样'}`);
+  console.log(`  第 1 条: "${run1[0].content}"`);
+  console.log(`  第 3 条: "${run1[2].content}"`);
+  console.log(`  第 5 条: "${run1[4].content}"`);
+
+  const run3 = await sdk.generateTitles({
+    productInfo: product,
+    candidateCount: 5,
+    seed: 100,
+    keywords: ['降噪', '蓝牙', '耳机'],
+  });
+  const diffSeed = run1[0].content !== run3[0].content;
+  console.log(`  不同 seed(42 vs 100)：${diffSeed ? '✅结果不同，seed 生效' : '❌结果一样，seed 无效'}`);
+  console.log('');
+
+  // ========== 20. 候选池配置 + 每条来源展示 ==========
+  console.log('20. 候选池配置（风格偏好/禁用套路 + 每条命中来源）');
+
+  console.log('  【默认池混合】5 条标题的风格分布：');
+  const defaultTitles = await sdk.generateTitles({ productInfo: product, candidateCount: 8 });
+  const poolStats: Record<string, number> = {};
+  defaultTitles.forEach(t => {
+    const style = t.poolInfo?.style || 'unknown';
+    poolStats[style] = (poolStats[style] || 0) + 1;
+  });
+  console.log(`    风格分布: ${JSON.stringify(poolStats)}`);
+  console.log('    前 3 条详情:');
+  defaultTitles.slice(0, 3).forEach((t, i) => {
+    console.log(`      ${i + 1}. [${t.poolInfo?.poolName || '未知'}] ${t.content.substring(0, 28)}...`);
+    console.log(`         理由: ${t.poolInfo?.selectedReason}`);
+  });
+
+  console.log('');
+  console.log('  【偏好种草风 + 禁用促销风】：');
+  const grassRootsTitles = await sdk.generateTitles({
+    productInfo: product,
+    candidateCount: 5,
+    poolConfig: {
+      preferredStyles: ['grassroots', 'youthful'],
+      disabledStyles: ['promotion'],
+    },
+  });
+  const grassPoolStats: Record<string, number> = {};
+  grassRootsTitles.forEach(t => {
+    const style = t.poolInfo?.style || 'unknown';
+    grassPoolStats[style] = (grassPoolStats[style] || 0) + 1;
+  });
+  console.log(`    风格分布: ${JSON.stringify(grassPoolStats)}`);
+  grassRootsTitles.slice(0, 3).forEach((t, i) => {
+    console.log(`      ${i + 1}. [${t.poolInfo?.poolName || '未知'}] ${t.content.substring(0, 30)}...`);
+  });
+
+  console.log('');
+  console.log('  【禁用套路："闭眼入"、"必入"】：');
+  const noPatternTitles = await sdk.generateTitles({
+    productInfo: product,
+    candidateCount: 5,
+    poolConfig: {
+      disabledPatterns: ['闭眼入', '必入', '赶紧'],
+    },
+  });
+  const hitBanned = noPatternTitles.some(t =>
+    ['闭眼入', '必入', '赶紧'].some(p => t.content.includes(p))
+  );
+  console.log(`    是否命中禁用套路: ${hitBanned ? '❌有命中' : '✅全部干净'}`);
+  noPatternTitles.forEach((t, i) => {
+    console.log(`      ${i + 1}. ${t.content.substring(0, 30)}...`);
+  });
+  console.log('');
+
+  // ========== 21. 运营视角 V2 质量报告（场景推荐 + 排序依据） ==========
+  console.log('21. 运营视角 V2 质量报告（场景推荐 + 排序依据）');
+
+  const v2Candidates = await sdk.generateTitles({
+    productInfo: product,
+    candidateCount: 5,
+    keywords: ['SoundMax', '降噪', '599', '蓝牙'],
+    lengthLimit: { min: 10, max: 30, unit: 'char' },
+  });
+
+  const withV2 = sdk.generateQualityReportsV2(v2Candidates, {
+    lengthLimit: { min: 10, max: 30, unit: 'char' },
+    keywords: ['SoundMax', '降噪', '599', '蓝牙'],
+    productInfo: product,
+    copyType: 'title',
+  });
+
+  withV2.slice(0, 3).forEach((c, idx) => {
+    const v2 = c.qualityReportV2;
+    console.log(`  第 ${idx + 1} 条: ${c.content.substring(0, 32)}...`);
+    console.log(`    综合分: ${v2?.overallScore.toFixed(2)}  |  长度: ${v2?.length.currentLength}字`);
+    console.log(`    排序依据: ${v2?.rankingBasis.slice(0, 4).join(' / ')}`);
+    console.log(`    推荐场景: ${v2?.recommendScenarios.slice(0, 3).map(s =>
+      `${s.scenario}(${Math.round(s.fitScore * 100)}%)`
+    ).join('、')}`);
+    if (v2?.recommendScenarios[0]) {
+      console.log(`    最佳场景理由: ${v2.recommendScenarios[0].reason}`);
+    }
+    console.log(`    来源池: ${c.poolInfo?.poolName} (匹配度${Math.round((c.poolInfo?.matchScore || 0) * 100)}%)`);
+  });
+  console.log('');
+
+  // ========== 22. 严格数量控制（开关任何功能都返回指定条数） ==========
+  console.log('22. 严格数量控制验证');
+
+  const testCases = [
+    { name: '默认配置（全功能开）', opts: { enableDeduplication: true, enableSorting: true, enableQualityCheck: false }, count: 5 },
+    { name: '关闭去重', opts: { enableDeduplication: false, enableSorting: true, enableQualityCheck: false }, count: 5 },
+    { name: '关闭排序', opts: { enableDeduplication: true, enableSorting: false, enableQualityCheck: false }, count: 5 },
+    { name: '关闭去重+排序', opts: { enableDeduplication: false, enableSorting: false, enableQualityCheck: false }, count: 5 },
+    { name: '全开 + 质量检查', opts: { enableDeduplication: true, enableSorting: true, enableQualityCheck: true }, count: 7 },
+    { name: '长文关闭去重（要 5 条回 5 条）', opts: { enableDeduplication: false, enableSorting: true, enableQualityCheck: false }, count: 5, type: 'long_form' as const },
+  ];
+
+  for (const tc of testCases) {
+    const params: any = { productInfo: product, candidateCount: tc.count };
+    let result;
+    if (tc.type === 'long_form') {
+      result = await sdk.generateLongForms(params, tc.opts as any);
+    } else {
+      result = await sdk.generateTitles(params, tc.opts as any);
+    }
+    const status = result.length === tc.count ? '✅' : '❌';
+    console.log(`  ${status} ${tc.name}: 请求${tc.count}条，实际返回 ${result.length} 条`);
+  }
+  console.log('');
+
   console.log('=== 全部增强功能演示完成 ===');
 }
 

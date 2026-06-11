@@ -7,7 +7,11 @@ import type {
   LongFormParams,
   ToneAdjustParams,
   ToneStyle,
+  PoolStyle,
+  CandidatePoolSource,
+  PoolConfig,
 } from './types';
+import { SeededRandom, hashStringToSeed } from './utils/random';
 
 function generateId(): string {
   return `gen_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
@@ -56,6 +60,7 @@ export type GenerateResponse = {
     content: string;
     score: number;
     tags: string[];
+    poolInfo?: CandidatePoolSource;
   }>;
 };
 
@@ -63,6 +68,7 @@ export class AIClient {
   private apiKey?: string;
   private apiEndpoint?: string;
   private model?: string;
+  private rng?: SeededRandom;
 
   constructor(config?: { apiKey?: string; apiEndpoint?: string; model?: string }) {
     this.apiKey = config?.apiKey;
@@ -70,29 +76,237 @@ export class AIClient {
     this.model = config?.model || 'gpt-3.5-turbo';
   }
 
+  private random(): number {
+    return this.rng ? this.rng.next() : Math.random();
+  }
+
+  private shuffle<T>(arr: T[]): T[] {
+    const result = [...arr];
+    for (let i = result.length - 1; i > 0; i--) {
+      const j = Math.floor(this.random() * (i + 1));
+      [result[i], result[j]] = [result[j], result[i]];
+    }
+    return result;
+  }
+
+  private pick<T>(arr: T[]): T {
+    const idx = Math.floor(this.random() * arr.length);
+    return arr[idx];
+  }
+
+  private initRng(params: BaseGenerateParams): void {
+    if (params.seed !== undefined) {
+      this.rng = new SeededRandom(params.seed);
+    } else {
+      const parts = [
+        params.productInfo?.name || '',
+        params.toneStyle || '',
+        params.keywords?.join(',') || '',
+        params.candidateCount || 0,
+        params.lengthLimit?.max || '',
+        params.language || '',
+      ].join('|');
+      const hash = hashStringToSeed(parts);
+      this.rng = new SeededRandom(hash ^ Math.floor(this.random() * 1e9));
+    }
+  }
+
+  private makePoolInfo(
+    poolId: string,
+    poolName: string,
+    style: PoolStyle,
+    matchScore: number,
+    reason: string
+  ): CandidatePoolSource {
+    return { poolId, poolName, style, matchScore, selectedReason: reason };
+  }
+
+  private classifyPoolStyle(
+    content: string,
+    copyType: CopyType,
+    index: number
+  ): CandidatePoolSource {
+    const styles: Array<{ style: PoolStyle; name: string; keywords: string[]; score: number }> = [
+      {
+        style: 'bestseller',
+        name: '爆款热卖池',
+        keywords: ['爆款', '热销', '销量', '销冠', 'TOP', '口碑', '万人', '累计销售', '销量王', '热卖', '抢手', '火爆', '疯抢', '断货'],
+        score: 0,
+      },
+      {
+        style: 'official',
+        name: '官方旗舰池',
+        keywords: ['官方', '品牌', '正品', '授权', '旗舰', '品质保证', '臻选', '严选', '专柜', '品质之选', '正品保障', '官方正品'],
+        score: 0,
+      },
+      {
+        style: 'grassroots',
+        name: '种草分享池',
+        keywords: ['种草', '安利', '绝绝子', 'yyds', '谁懂', '我真的', '姐妹们', '亲测', '推荐', '好物', '必入', '闭眼入', '回购'],
+        score: 0,
+      },
+      {
+        style: 'promotion',
+        name: '促销优惠池',
+        keywords: ['限时', '特价', '优惠', '折扣', '立减', '买赠', '清仓', '钜惠', '特惠', '大促', '降价', '到手价', '券后', '满减'],
+        score: 0,
+      },
+      {
+        style: 'emotional',
+        name: '情感共鸣池',
+        keywords: ['感动', '温暖', '幸福', '爱', '心动', '治愈', '美好', '陪伴', '守护', '为你', '懂你', '专属', '贴心'],
+        score: 0,
+      },
+      {
+        style: 'professional',
+        name: '专业技术池',
+        keywords: ['专业', '科技', '技术', '研发', '专利', '认证', '标准', '黑科技', '行业', '领先', '创新', '高端技术', '性能'],
+        score: 0,
+      },
+      {
+        style: 'youthful',
+        name: '年轻潮流池',
+        keywords: ['潮酷', '年轻', '活力', '个性', '玩趣', 'Z世代', '敢潮', '炸街', '吸睛', '颜值', '潮流', '时尚', '超飒'],
+        score: 0,
+      },
+      {
+        style: 'luxury',
+        name: '奢华高端池',
+        keywords: ['奢华', '高端', '尊享', '贵族', '私享', '臻品', '顶级', '旗舰', '大师', '匠心', '精工', '典藏', '限量版'],
+        score: 0,
+      },
+    ];
+
+    const lowerContent = content.toLowerCase();
+    const hasEmoji = /[\u{1F300}-\u{1F9FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}]/u.test(content);
+
+    for (const style of styles) {
+      let count = 0;
+      for (const kw of style.keywords) {
+        if (lowerContent.includes(kw.toLowerCase())) count++;
+      }
+      style.score = count + (hasEmoji && style.style === 'grassroots' ? 1 : 0);
+    }
+
+    styles.sort((a, b) => b.score - a.score);
+
+    let best = styles[0];
+    if (best.score === 0) {
+      const fallbackMap: Record<string, PoolStyle> = {
+        selling_point: 'professional',
+        title: 'bestseller',
+        promo_short: 'promotion',
+        long_form: 'grassroots',
+        tone_adjust: 'emotional',
+      };
+      const fallbackStyle = fallbackMap[copyType] || 'bestseller';
+      best = styles.find(s => s.style === fallbackStyle) || styles[0];
+    }
+
+    const matchScore = Math.min(1, 0.4 + best.score * 0.12);
+    const reasons: string[] = [];
+
+    const hitKeywords = styles[0].keywords.filter(kw => lowerContent.includes(kw.toLowerCase())).slice(0, 3);
+    if (hitKeywords.length > 0) {
+      reasons.push(`命中关键词：${hitKeywords.join('、')}`);
+    }
+    if (hasEmoji && best.style === 'grassroots') {
+      reasons.push('有表情符号，风格活泼');
+    }
+    if (best.score === 0) {
+      reasons.push(`默认归类到${best.name}`);
+    }
+    reasons.push(`匹配度${Math.round(matchScore * 100)}%`);
+
+    return {
+      poolId: `pool_${best.style}_${index}`,
+      poolName: best.name,
+      style: best.style,
+      matchScore: Math.round(matchScore * 100) / 100,
+      selectedReason: reasons.join('；'),
+    };
+  }
+
+  private applyPoolConfig<T extends { poolInfo?: CandidatePoolSource }>(
+    items: T[],
+    poolConfig?: PoolConfig
+  ): T[] {
+    if (!poolConfig) return items;
+
+    let result = [...items];
+
+    if (poolConfig.disabledStyles && poolConfig.disabledStyles.length > 0) {
+      result = result.filter(item =>
+        !item.poolInfo || !poolConfig.disabledStyles!.includes(item.poolInfo.style)
+      );
+    }
+
+    if (poolConfig.disabledPatterns && poolConfig.disabledPatterns.length > 0) {
+      // disabledPatterns 由上层在生成时处理，这里只做二次过滤
+    }
+
+    if (poolConfig.preferredStyles && poolConfig.preferredStyles.length > 0) {
+      const preferred = new Set(poolConfig.preferredStyles);
+      result.sort((a, b) => {
+        const aScore = a.poolInfo && preferred.has(a.poolInfo.style) ? 1 : 0;
+        const bScore = b.poolInfo && preferred.has(b.poolInfo.style) ? 1 : 0;
+        return bScore - aScore;
+      });
+    }
+
+    return result;
+  }
+
   public async generate(
     type: CopyType,
     params: BaseGenerateParams
   ): Promise<GenerateResponse> {
     await simulateDelay();
+    this.initRng(params);
 
     const id = generateId();
     const count = params.candidateCount || 3;
 
+    let result: GenerateResponse;
+
     switch (type) {
       case 'selling_point':
-        return this.generateSellingPoints(id, params as SellingPointParams, count);
+        result = this.generateSellingPoints(id, params as SellingPointParams, count);
+        break;
       case 'title':
-        return this.generateTitles(id, params as TitleParams, count);
+        result = this.generateTitles(id, params as TitleParams, count);
+        break;
       case 'promo_short':
-        return this.generatePromoShorts(id, params as PromoShortParams, count);
+        result = this.generatePromoShorts(id, params as PromoShortParams, count);
+        break;
       case 'long_form':
-        return this.generateLongForms(id, params as LongFormParams, count);
+        result = this.generateLongForms(id, params as LongFormParams, count);
+        break;
       case 'tone_adjust':
-        return this.generateToneAdjusts(id, params as ToneAdjustParams, count);
+        result = this.generateToneAdjusts(id, params as ToneAdjustParams, count);
+        break;
       default:
-        return { id, candidates: [] };
+        result = { id, candidates: [] };
     }
+
+    const candidatesWithPool = result.candidates.map((c, idx) => ({
+      ...c,
+      poolInfo: c.poolInfo || this.classifyPoolStyle(c.content, type, idx),
+    }));
+
+    const filtered = this.applyPoolConfig(candidatesWithPool, params.poolConfig);
+
+    if (params.poolConfig?.disabledPatterns && params.poolConfig.disabledPatterns.length > 0) {
+      const patterns = params.poolConfig.disabledPatterns;
+      const finalCandidates = filtered.filter(c =>
+        !patterns.some(p => c.content.includes(p))
+      );
+      if (finalCandidates.length > 0) {
+        return { id: result.id, candidates: finalCandidates };
+      }
+    }
+
+    return { id: result.id, candidates: filtered };
   }
 
   // ===== 卖点生成：支持大量候选（20+） =====
@@ -206,7 +420,7 @@ export class AIClient {
 
     baseTemplates.push(...bulletFormats);
 
-    const finalTemplates = shuffleArray(baseTemplates).slice(0, Math.max(count * 2, 50));
+    const finalTemplates = this.shuffle(baseTemplates).slice(0, Math.max(count * 2, 50));
     const results: Array<{ content: string; tags: string[] }> = [];
     const seen = new Set<string>();
 
@@ -239,7 +453,7 @@ export class AIClient {
     const selected = results.slice(0, count);
     const candidates = selected.map((item, index) => ({
       content: item.content,
-      score: 0.65 + (Math.random() * 0.35),
+      score: 0.65 + (this.random() * 0.35),
       tags: ['卖点', tone, category, ...item.tags],
     }));
 
@@ -297,7 +511,7 @@ export class AIClient {
       });
     }
 
-    const shuffled = shuffleArray(allTemplates);
+    const shuffled = this.shuffle(allTemplates);
     const results: Array<{ content: string; tags: string[] }> = [];
     const seen = new Set<string>();
 
@@ -325,7 +539,7 @@ export class AIClient {
     const selected = results.slice(0, count);
     const candidates = selected.map((item, index) => ({
       content: item.content,
-      score: 0.65 + (Math.random() * 0.35),
+      score: 0.65 + (this.random() * 0.35),
       tags: ['标题', tone, ...item.tags, `版本${index + 1}`],
     }));
 
@@ -370,7 +584,7 @@ export class AIClient {
         `【稀缺好物】${productName}，数量有限，先到先得！`,
         `手慢无！${productName}仅剩最后50件，抢完恢复原价！`,
         `${tone}预警：${productName}库存告急，仅剩最后一批！`,
-        `【限量抢】${productName}，全国限量${Math.floor(Math.random() * 500) + 100}份！`,
+        `【限量抢】${productName}，全国限量${Math.floor(this.random() * 500) + 100}份！`,
         `${productName}限时开售，${tone}推荐，错过等半年！`,
         `独家限量！${brand}${productName}，卖完不补！`,
         `只剩最后88件！${productName}库存紧张，欲购从速！`,
@@ -386,11 +600,11 @@ export class AIClient {
         `${tone}福利：购买${productName}即享赠品礼包！`,
         `【买一送一】${productName}，超值组合等你来！`,
         `${brand || '品牌'}回馈：买${productName}赠精美礼品一份！`,
-        `${tone}惊喜：${productName}买即送，赠品价值${Math.floor(Math.random() * 100) + 50}元！`,
+        `${tone}惊喜：${productName}买即送，赠品价值${Math.floor(this.random() * 100) + 50}元！`,
         `【超值套装】${productName} + 赠品，${tone}之选！`,
         `买就送！${productName}配套好礼等你拿，${tone}推荐！`,
         `${tone}福利时刻：${productName}买一赠N，错过太可惜！`,
-        `【赠完即止】买${productName}送${fmtPrice(Math.floor(Math.random()*100+50))}元大礼包！`,
+        `【赠完即止】买${productName}送${fmtPrice(Math.floor(this.random()*100+50))}元大礼包！`,
         `买${productName}，送豪华配件大礼包！${tone}必入！`,
         `【赠品加码】购${productName}，赠2件好礼，先到先得！`,
         `${tone}专属：${productName}下单即送神秘礼品！`,
@@ -409,7 +623,7 @@ export class AIClient {
         `全新${productName}，${tone}品质，全新体验！`,
         `【NEW新品】${productName}全新一代，首发特惠！`,
         `新一代${productName}来了！${tone}首发价${fmtPrice(price)}元！`,
-        `新品首发：${productName}全新升级，首批限量${Math.floor(Math.random()*500+100)}件！`,
+        `新品首发：${productName}全新升级，首批限量${Math.floor(this.random()*500+100)}件！`,
         `${tone}尝鲜价！${productName}新品上市，限时特惠${discount}折！`,
         `【新品速递】${brand}${productName}，全新体验首发！`,
         `重磅上新！${productName}全新版本，${tone}品质！`,
@@ -419,7 +633,7 @@ export class AIClient {
         `爆款热销！${productName}已售10万+，好评如潮！`,
         `${tone}力荐 | ${productName}全网热卖，错过后悔！`,
         `【人气王】${productName}，千万用户的共同选择！`,
-        `销量王！${productName}累计销售${Math.floor(Math.random() * 50) + 10}万件！`,
+        `销量王！${productName}累计销售${Math.floor(this.random() * 50) + 10}万件！`,
         `${tone}推荐爆款：${productName}，大家都在买！`,
         `【断货王】${productName}，开售即爆款，回购率超高！`,
         `全网热销${productName}，${tone}品质，万人好评！`,
@@ -427,9 +641,9 @@ export class AIClient {
         `🔥爆卖！${productName}全网销量TOP1，回购率99%！`,
         `【口碑炸裂】${productName}好评率99%，10万+用户都说好！`,
         `热销榜单第一！${productName}${tone}品质，爆款来袭！`,
-        `已售${Math.floor(Math.random() * 50) + 10}万+！${productName}万人追捧！`,
+        `已售${Math.floor(this.random() * 50) + 10}万+！${productName}万人追捧！`,
         `【网红爆款】${productName}，明星达人都在用！`,
-        `销量说话！${productName}蝉联${Math.floor(Math.random()*5+1)}周销冠！`,
+        `销量说话！${productName}蝉联${Math.floor(this.random()*5+1)}周销冠！`,
         `疯抢中！${productName}全网热卖，库存告急！`,
       ],
     };
@@ -464,9 +678,9 @@ export class AIClient {
           '',
           `【${tone}版】`,
           `${brand ? '【' + brand + '】' : ''}`,
-          `【限时${Math.floor(Math.random() * 48) + 1}H】`,
-          `【${Math.floor(Math.random() * 500) + 100}元券】`,
-          `【前${Math.floor(Math.random() * 200) + 50}名】`,
+          `【限时${Math.floor(this.random() * 48) + 1}H】`,
+          `【${Math.floor(this.random() * 500) + 100}元券】`,
+          `【前${Math.floor(this.random() * 200) + 50}名】`,
           `【直播间专属】`,
           `【VIP专享】`,
           `【粉丝价】`,
@@ -480,7 +694,7 @@ export class AIClient {
 
     allTemplates.push(...comboTemplates);
 
-    const shuffled = shuffleArray(allTemplates);
+    const shuffled = this.shuffle(allTemplates);
     const results: Array<{ content: string; tags: string[] }> = [];
     const seen = new Set<string>();
 
@@ -507,7 +721,7 @@ export class AIClient {
     const selected = results.slice(0, count);
     const candidates = selected.map((item, index) => ({
       content: item.content,
-      score: 0.65 + (Math.random() * 0.35),
+      score: 0.65 + (this.random() * 0.35),
       tags: ['促销', promotionType, tone, ...item.tags, `版本${index + 1}`],
     }));
 
@@ -946,7 +1160,7 @@ ${features[2]}需要定期维护，否则会影响使用效果。
       }
     }
 
-    const shuffled = shuffleArray(templates);
+    const shuffled = this.shuffle(templates);
     const targetCount = count * 3;
     const selected: any[] = shuffled.slice(0, Math.min(targetCount, shuffled.length));
 
@@ -959,7 +1173,7 @@ ${features[2]}需要定期维护，否则会影响使用效果。
 
     const candidates = selected.map((item, index) => ({
       content: typeof item === 'function' ? item() : (item.content || ''),
-      score: 0.65 + (Math.random() * 0.35),
+      score: 0.65 + (this.random() * 0.35),
       tags: ['长文', format, tone, `版本${index + 1}`],
     }));
 
@@ -971,7 +1185,7 @@ ${features[2]}需要定期维护，否则会影响使用效果。
       (text) => `——${seed % 2 === 0 ? '深度测评' : '用户体验'}——\n\n` + text + `\n\n—— 以上为${seed % 3 === 0 ? '官方介绍' : '达人推荐'}内容 ——`,
       (text) => {
         const lines = text.split('\n');
-        const longLines = shuffleArray(lines.filter(l => l.trim().length > 10));
+        const longLines = this.shuffle(lines.filter(l => l.trim().length > 10));
         const extra = longLines.slice(0, 2).join('\n\n');
         return text + `\n\n【补充说明${seed}】\n${extra}`;
       },
@@ -1011,9 +1225,9 @@ ${features[2]}需要定期维护，否则会影响使用效果。
       },
       (text) => {
         const stats = [
-          `\n\n📊 销售数据：已累计售出${Math.floor(Math.random() * 50) + 10}万件，好评率${Math.floor(Math.random() * 5) + 95}%`,
-          `\n\n🏆 荣誉榜单：连续${Math.floor(Math.random() * 10) + 1}周蝉联${productName}品类销量TOP3`,
-          `\n\n💯 品质保证：通过${Math.floor(Math.random() * 10) + 10}项严格质检，品质有保障`,
+          `\n\n📊 销售数据：已累计售出${Math.floor(this.random() * 50) + 10}万件，好评率${Math.floor(this.random() * 5) + 95}%`,
+          `\n\n🏆 荣誉榜单：连续${Math.floor(this.random() * 10) + 1}周蝉联${productName}品类销量TOP3`,
+          `\n\n💯 品质保证：通过${Math.floor(this.random() * 10) + 10}项严格质检，品质有保障`,
         ];
         return stats[seed % stats.length] + '\n\n' + text;
       },
@@ -1106,8 +1320,8 @@ ${features[2]}需要定期维护，否则会影响使用效果。
         (text) => `快！${text}${targetToneText}福利，手慢无！`,
         (text) => `【最后X小时】${text}${targetToneText}推荐，赶紧冲！`,
         (text) => `${targetToneText}！${text}再不行动就晚了！`,
-        (text) => `⚡速看！${text}仅剩最后${Math.floor(Math.random()*50)+10}件！`,
-        (text) => `【紧急】${text}活动即将结束，倒计时${Math.floor(Math.random()*24)+1}小时！`,
+        (text) => `⚡速看！${text}仅剩最后${Math.floor(this.random()*50)+10}件！`,
+        (text) => `【紧急】${text}活动即将结束，倒计时${Math.floor(this.random()*24)+1}小时！`,
         (text) => `🚨别犹豫了！${text}马上就没了，快抢！`,
       ],
       luxury: [
@@ -1138,7 +1352,7 @@ ${features[2]}需要定期维护，否则会影响使用效果。
     const results: Array<{ content: string; tags: string[] }> = [];
     const seen = new Set<string>();
 
-    const shuffledStrategies = shuffleArray(strategies.map((fn, i) => ({ fn, idx: i })));
+    const shuffledStrategies = this.shuffle(strategies.map((fn, i) => ({ fn, idx: i })));
 
     for (let i = 0; i < shuffledStrategies.length && results.length < count; i++) {
       const { fn, idx } = shuffledStrategies[i];
@@ -1177,7 +1391,7 @@ ${features[2]}需要定期维护，否则会影响使用效果。
     const selected = results.slice(0, count);
     const candidates = selected.map((item, index) => ({
       content: item.content,
-      score: 0.65 + (Math.random() * 0.35),
+      score: 0.65 + (this.random() * 0.35),
       tags: ['语气调整', targetToneText, ...item.tags, `版本${index + 1}`],
     }));
 
