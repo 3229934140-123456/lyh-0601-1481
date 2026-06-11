@@ -63,6 +63,7 @@ export type CopyCandidate = {
   tags: string[];
   sensitiveWords: SensitiveWordMatch[];
   hasSensitive: boolean;
+  qualityReport?: QualityReport;
   createdAt: number;
   metadata?: Record<string, unknown>;
 };
@@ -152,6 +153,7 @@ export type GenerateOptions = {
   enableSorting?: boolean;
   sortConfig?: Partial<SortConfig>;
   enableDeduplication?: boolean;
+  enableQualityCheck?: boolean;
   timeout?: number;
   retry?: Partial<RetryConfig>;
 };
@@ -192,4 +194,62 @@ export type SensitiveCheckResult = {
   hasSensitive: boolean;
   matches: SensitiveWordMatch[];
   level: SensitiveWordLevel;
+};
+
+export type LengthCheckResult = {
+  valid: boolean;
+  currentLength: number;
+  minLength?: number;
+  maxLength?: number;
+  unit: 'char' | 'word';
+  tooShort: boolean;
+  tooLong: boolean;
+};
+
+export type KeywordCheckResult = {
+  allIncluded: boolean;
+  includedKeywords: string[];
+  missingKeywords: string[];
+  inclusionRate: number;
+};
+
+export type CoreInfoCheckResult = {
+  hasProductName: boolean;
+  hasBrand: boolean;
+  hasPrice: boolean;
+  hasFeatures: boolean;
+  missingInfo: string[];
+  completeness: number;
+};
+
+export type QualityReport = {
+  length: LengthCheckResult;
+  keywords: KeywordCheckResult;
+  coreInfo: CoreInfoCheckResult;
+  isDuplicate: boolean;
+  duplicateWith?: string;
+  overallScore: number;
+  suggestions: string[];
+};
+
+export type TemplatePreviewResult = {
+  id: string;
+  name: string;
+  originalContent: string;
+  previewContent: string;
+  variables: string[];
+  filledVariables: string[];
+  missingVariables: string[];
+  isComplete: boolean;
+};
+
+export type BatchFillResult = {
+  templateId: string;
+  templateName: string;
+  content: string;
+  success: boolean;
+  error?: string;
+  variables: string[];
+  filledVariables: string[];
+  missingVariables: string[];
 };

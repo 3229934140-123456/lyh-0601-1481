@@ -9,39 +9,22 @@ import type {
   ToneAdjustParams,
   GenerateOptions,
   SensitiveWordMatch,
-  LengthLimit,
+  QualityReport,
 } from './types';
 import { AIClient } from './aiClient';
 import { SensitiveWordChecker } from './sensitive';
 import { sortCandidates, deduplicateCandidates } from './sorter';
 import { withRetry, withTimeout } from './retry';
+import { QualityChecker, truncateText } from './quality';
 
 function generateCandidateId(): string {
   return `cand_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 }
 
-function truncateText(text: string, limit?: LengthLimit): string {
-  if (!limit || limit.max === undefined) return text;
-
-  const unit = limit.unit || 'char';
-
-  if (unit === 'char') {
-    if (text.length > limit.max) {
-      return text.substring(0, limit.max - 3) + '...';
-    }
-  } else {
-    const words = text.split(/\s+/);
-    if (words.length > limit.max) {
-      return words.slice(0, limit.max - 1).join(' ') + ' ...';
-    }
-  }
-
-  return text;
-}
-
 export class CopyGenerator {
   private aiClient: AIClient;
   private sensitiveChecker: SensitiveWordChecker;
+  private qualityChecker: QualityChecker;
   private defaultOptions: GenerateOptions;
 
   constructor(
@@ -51,10 +34,12 @@ export class CopyGenerator {
   ) {
     this.aiClient = aiClient;
     this.sensitiveChecker = sensitiveChecker;
+    this.qualityChecker = new QualityChecker();
     this.defaultOptions = {
       enableSensitiveCheck: true,
       enableSorting: true,
       enableDeduplication: true,
+      enableQualityCheck: false,
       ...defaultOptions,
     };
   }
@@ -106,7 +91,7 @@ export class CopyGenerator {
 
       let candidates: CopyCandidate[] = response.candidates.map((c) => ({
         id: generateCandidateId(),
-        content: truncateText(c.content, params.lengthLimit),
+        content: c.content,
         type,
         score: c.score,
         tags: c.tags,
@@ -115,8 +100,24 @@ export class CopyGenerator {
         createdAt: Date.now(),
       }));
 
+      if (params.lengthLimit) {
+        candidates = candidates.map((c) => ({
+          ...c,
+          content: truncateText(c.content, params.lengthLimit),
+        }));
+      }
+
       if (opts.enableDeduplication) {
-        candidates = deduplicateCandidates(candidates, 0.7);
+        const targetCount = params.candidateCount || 3;
+        let threshold = 0.75;
+        let deduplicated = deduplicateCandidates(candidates, threshold);
+
+        while (deduplicated.length < targetCount && threshold < 0.95) {
+          threshold += 0.05;
+          deduplicated = deduplicateCandidates(candidates, threshold);
+        }
+
+        candidates = deduplicated.slice(0, Math.min(targetCount, deduplicated.length));
       }
 
       if (opts.enableSensitiveCheck) {
@@ -127,6 +128,14 @@ export class CopyGenerator {
             sensitiveWords: checkResult.matches,
             hasSensitive: checkResult.hasSensitive,
           };
+        });
+      }
+
+      if (opts.enableQualityCheck) {
+        candidates = this.qualityChecker.generateAllReports(candidates, {
+          lengthLimit: params.lengthLimit,
+          keywords: params.keywords,
+          productInfo: params.productInfo,
         });
       }
 
@@ -163,5 +172,32 @@ export class CopyGenerator {
 
   public filterSensitiveText(text: string, replacement?: string): string {
     return this.sensitiveChecker.filterText(text, replacement);
+  }
+
+  public checkQuality(
+    candidate: CopyCandidate,
+    options: {
+      lengthLimit?: import('./types').LengthLimit;
+      keywords?: string[];
+      productInfo?: import('./types').ProductInfo;
+      allCandidates?: CopyCandidate[];
+    } = {}
+  ): QualityReport {
+    return this.qualityChecker.generateReport(candidate, options);
+  }
+
+  public generateQualityReports(
+    candidates: CopyCandidate[],
+    options: {
+      lengthLimit?: import('./types').LengthLimit;
+      keywords?: string[];
+      productInfo?: import('./types').ProductInfo;
+    } = {}
+  ): CopyCandidate[] {
+    return this.qualityChecker.generateAllReports(candidates, options);
+  }
+
+  public truncateText(text: string, limit: import('./types').LengthLimit): string {
+    return truncateText(text, limit);
   }
 }

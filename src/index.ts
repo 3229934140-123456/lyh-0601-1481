@@ -15,6 +15,11 @@ import type {
   BatchResultItem,
   SensitiveCheckResult,
   SortConfig,
+  QualityReport,
+  TemplatePreviewResult,
+  BatchFillResult,
+  LengthLimit,
+  ProductInfo,
 } from './types';
 import { AIClient } from './aiClient';
 import { SensitiveWordChecker } from './sensitive';
@@ -22,6 +27,7 @@ import { TemplateManager } from './template';
 import { RecordManager } from './record';
 import { CopyGenerator } from './generator';
 import { sortCandidates } from './sorter';
+import { QualityChecker, truncateText as truncateTextUtil } from './quality';
 
 function generateRecordId(): string {
   return `rec_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
@@ -34,6 +40,7 @@ export class CopySDK {
   private templateManager: TemplateManager;
   private recordManager: RecordManager;
   private generator: CopyGenerator;
+  private qualityChecker: QualityChecker;
 
   constructor(config: SDKConfig = {}) {
     this.config = {
@@ -61,6 +68,8 @@ export class CopySDK {
       this.recordManager.setOnRecordCallback(this.config.onGenerate);
     }
 
+    this.qualityChecker = new QualityChecker();
+
     this.generator = new CopyGenerator(
       this.aiClient,
       this.sensitiveChecker,
@@ -69,6 +78,7 @@ export class CopySDK {
         enableSorting: this.config.enableSorting,
         sortConfig: this.config.sortConfig as Partial<SortConfig>,
         retry: this.config.retry,
+        enableQualityCheck: false,
       }
     );
   }
@@ -199,6 +209,33 @@ export class CopySDK {
     return sortCandidates(candidates, config, idealLength);
   }
 
+  public checkQuality(
+    candidate: CopyCandidate,
+    options: {
+      lengthLimit?: LengthLimit;
+      keywords?: string[];
+      productInfo?: ProductInfo;
+      allCandidates?: CopyCandidate[];
+    } = {}
+  ): QualityReport {
+    return this.qualityChecker.generateReport(candidate, options);
+  }
+
+  public generateQualityReports(
+    candidates: CopyCandidate[],
+    options: {
+      lengthLimit?: LengthLimit;
+      keywords?: string[];
+      productInfo?: ProductInfo;
+    } = {}
+  ): CopyCandidate[] {
+    return this.qualityChecker.generateAllReports(candidates, options);
+  }
+
+  public truncateText(text: string, limit: LengthLimit): string {
+    return truncateTextUtil(text, limit);
+  }
+
   public getTemplate(id: string): CopyTemplate | null {
     return this.templateManager.getTemplate(id);
   }
@@ -230,6 +267,32 @@ export class CopySDK {
 
   public fillTemplateContent(content: string, variables: Record<string, string>): string {
     return this.templateManager.fillTemplateContent(content, variables);
+  }
+
+  public previewTemplate(
+    id: string,
+    variables: Record<string, string>
+  ): TemplatePreviewResult {
+    return this.templateManager.previewTemplate(id, variables);
+  }
+
+  public previewTemplateContent(
+    content: string,
+    variables: Record<string, string>
+  ): TemplatePreviewResult {
+    return this.templateManager.previewTemplateContent(content, { variables });
+  }
+
+  public batchFillTemplates(
+    items: Array<{ templateId: string; variables: Record<string, string> }>
+  ): BatchFillResult[] {
+    return this.templateManager.batchFill(items);
+  }
+
+  public batchPreviewTemplates(
+    items: Array<{ templateId: string; variables: Record<string, string> }>
+  ): Array<TemplatePreviewResult & { success: boolean; error?: string }> {
+    return this.templateManager.batchPreview(items);
   }
 
   public getGenerationRecord(id: string): GenerationRecord | null {
