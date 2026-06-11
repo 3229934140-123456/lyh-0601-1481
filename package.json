@@ -1,0 +1,28 @@
+{
+  "name": "ai-copy-sdk",
+  "version": "1.0.0",
+  "description": "AI 文案生成 SDK - 统一的电商、活动运营和内容工具文案能力",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "node dist/examples/basic.js",
+    "example": "ts-node examples/basic.ts"
+  },
+  "keywords": [
+    "ai",
+    "copywriting",
+    "sdk",
+    "ecommerce",
+    "marketing"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0",
+    "ts-node": "^10.9.0"
+  },
+  "dependencies": {}
+}

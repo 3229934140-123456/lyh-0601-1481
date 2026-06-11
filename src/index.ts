@@ -1,0 +1,263 @@
+import type {
+  SDKConfig,
+  CopyType,
+  CopyCandidate,
+  CopyTemplate,
+  GenerationRecord,
+  BaseGenerateParams,
+  SellingPointParams,
+  TitleParams,
+  PromoShortParams,
+  LongFormParams,
+  ToneAdjustParams,
+  GenerateOptions,
+  BatchGenerateItem,
+  BatchResultItem,
+  SensitiveCheckResult,
+  SortConfig,
+} from './types';
+import { AIClient } from './aiClient';
+import { SensitiveWordChecker } from './sensitive';
+import { TemplateManager } from './template';
+import { RecordManager } from './record';
+import { CopyGenerator } from './generator';
+import { sortCandidates } from './sorter';
+
+function generateRecordId(): string {
+  return `rec_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+}
+
+export class CopySDK {
+  private config: SDKConfig;
+  private aiClient: AIClient;
+  private sensitiveChecker: SensitiveWordChecker;
+  private templateManager: TemplateManager;
+  private recordManager: RecordManager;
+  private generator: CopyGenerator;
+
+  constructor(config: SDKConfig = {}) {
+    this.config = {
+      defaultToneStyle: 'professional',
+      defaultCandidateCount: 3,
+      defaultLanguage: 'zh-CN',
+      enableSensitiveCheck: true,
+      enableSorting: true,
+      ...config,
+    };
+
+    this.aiClient = new AIClient({
+      apiKey: this.config.apiKey,
+      apiEndpoint: this.config.apiEndpoint,
+      model: this.config.model,
+    });
+
+    this.sensitiveChecker = new SensitiveWordChecker(this.config.sensitiveWordList);
+
+    this.templateManager = new TemplateManager(this.config.customTemplates);
+
+    this.recordManager = new RecordManager(1000);
+
+    if (this.config.onGenerate) {
+      this.recordManager.setOnRecordCallback(this.config.onGenerate);
+    }
+
+    this.generator = new CopyGenerator(
+      this.aiClient,
+      this.sensitiveChecker,
+      {
+        enableSensitiveCheck: this.config.enableSensitiveCheck,
+        enableSorting: this.config.enableSorting,
+        sortConfig: this.config.sortConfig as Partial<SortConfig>,
+        retry: this.config.retry,
+      }
+    );
+  }
+
+  public async generateSellingPoints(
+    params: SellingPointParams,
+    options?: GenerateOptions
+  ): Promise<CopyCandidate[]> {
+    return this.generate('selling_point', params, options);
+  }
+
+  public async generateTitles(
+    params: TitleParams,
+    options?: GenerateOptions
+  ): Promise<CopyCandidate[]> {
+    return this.generate('title', params, options);
+  }
+
+  public async generatePromoShorts(
+    params: PromoShortParams,
+    options?: GenerateOptions
+  ): Promise<CopyCandidate[]> {
+    return this.generate('promo_short', params, options);
+  }
+
+  public async generateLongForms(
+    params: LongFormParams,
+    options?: GenerateOptions
+  ): Promise<CopyCandidate[]> {
+    return this.generate('long_form', params, options);
+  }
+
+  public async adjustTone(
+    params: ToneAdjustParams,
+    options?: GenerateOptions
+  ): Promise<CopyCandidate[]> {
+    return this.generate('tone_adjust', params, options);
+  }
+
+  public async generate(
+    type: CopyType,
+    params: BaseGenerateParams,
+    options?: GenerateOptions
+  ): Promise<CopyCandidate[]> {
+    const mergedParams = this.mergeDefaultParams(params);
+    const recordId = generateRecordId();
+
+    const record: GenerationRecord = {
+      id: recordId,
+      type,
+      productInfo: mergedParams.productInfo,
+      params: mergedParams as Record<string, unknown>,
+      candidates: [],
+      status: 'success',
+      createdAt: Date.now(),
+    };
+
+    try {
+      const candidates = await this.generator.generate(type, mergedParams, options);
+      record.candidates = candidates;
+      record.status = candidates.length > 0 ? 'success' : 'partial';
+      record.completedAt = Date.now();
+      record.duration = Date.now() - record.createdAt;
+
+      this.recordManager.addRecord(record);
+
+      return candidates;
+    } catch (error) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      record.status = 'failed';
+      record.error = err.message;
+      record.completedAt = Date.now();
+      record.duration = Date.now() - record.createdAt;
+
+      this.recordManager.addRecord(record);
+
+      if (this.config.onError) {
+        this.config.onError(err, { type, params: mergedParams });
+      }
+
+      throw err;
+    }
+  }
+
+  public async batchGenerate(
+    items: BatchGenerateItem[]
+  ): Promise<BatchResultItem[]> {
+    const results: BatchResultItem[] = [];
+
+    for (const item of items) {
+      const itemId = item.id || generateRecordId();
+
+      try {
+        const candidates = await this.generate(item.type, item.params, item.options);
+        results.push({
+          id: itemId,
+          type: item.type,
+          success: true,
+          candidates,
+        });
+      } catch (error) {
+        const err = error instanceof Error ? error : new Error(String(error));
+        results.push({
+          id: itemId,
+          type: item.type,
+          success: false,
+          error: err.message,
+        });
+      }
+    }
+
+    return results;
+  }
+
+  public checkSensitive(text: string): SensitiveCheckResult {
+    return this.sensitiveChecker.check(text);
+  }
+
+  public filterSensitiveText(text: string, replacement?: string): string {
+    return this.sensitiveChecker.filterText(text, replacement);
+  }
+
+  public sortCandidates(
+    candidates: CopyCandidate[],
+    config?: Partial<SortConfig>,
+    idealLength?: number
+  ): CopyCandidate[] {
+    return sortCandidates(candidates, config, idealLength);
+  }
+
+  public getTemplate(id: string): CopyTemplate | null {
+    return this.templateManager.getTemplate(id);
+  }
+
+  public listTemplates(type?: CopyType): CopyTemplate[] {
+    return this.templateManager.listTemplates(type);
+  }
+
+  public addTemplate(
+    template: Omit<CopyTemplate, 'id' | 'createdAt' | 'updatedAt' | 'variables'> & { id?: string }
+  ): CopyTemplate {
+    return this.templateManager.addTemplate(template);
+  }
+
+  public updateTemplate(
+    id: string,
+    updates: Partial<Omit<CopyTemplate, 'id' | 'createdAt' | 'updatedAt' | 'variables'>>
+  ): CopyTemplate | null {
+    return this.templateManager.updateTemplate(id, updates);
+  }
+
+  public deleteTemplate(id: string): boolean {
+    return this.templateManager.deleteTemplate(id);
+  }
+
+  public fillTemplate(id: string, variables: Record<string, string>): string {
+    return this.templateManager.fillTemplate(id, variables);
+  }
+
+  public fillTemplateContent(content: string, variables: Record<string, string>): string {
+    return this.templateManager.fillTemplateContent(content, variables);
+  }
+
+  public getGenerationRecord(id: string): GenerationRecord | null {
+    return this.recordManager.getRecord(id);
+  }
+
+  public listGenerationRecords(type?: CopyType, limit?: number, offset?: number): GenerationRecord[] {
+    return this.recordManager.listRecords(type, limit, offset);
+  }
+
+  public getStatistics(): {
+    total: number;
+    success: number;
+    failed: number;
+    partial: number;
+    averageDuration: number;
+  } {
+    return this.recordManager.getStatistics();
+  }
+
+  private mergeDefaultParams<T extends BaseGenerateParams>(params: T): T {
+    return {
+      ...params,
+      toneStyle: params.toneStyle || this.config.defaultToneStyle,
+      candidateCount: params.candidateCount || this.config.defaultCandidateCount,
+      language: params.language || this.config.defaultLanguage,
+    };
+  }
+}
+
+export default CopySDK;
