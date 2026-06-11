@@ -288,7 +288,190 @@ async function main() {
   });
   console.log('');
 
-  console.log('=== 增强功能演示完成 ===');
+  // ========== 13. 大量候选验证（20条标题 + 15条促销语） ==========
+  console.log('13. 大量候选验证（20条标题、15条促销语）');
+  const titles20 = await sdk.generateTitles({
+    productInfo: product,
+    candidateCount: 20,
+    keywords: ['降噪', '蓝牙', '耳机'],
+    lengthLimit: { max: 30, unit: 'char' },
+  });
+  console.log(`  标题: 请求20条，实际返回 ${titles20.length} 条`);
+  const titleContents = titles20.map(t => t.content);
+  const uniqueTitles = new Set(titleContents.map(c => c.substring(0, 15))).size;
+  console.log(`  标题前缀不重复率: ${uniqueTitles}/${titles20.length} (${Math.round(uniqueTitles / titles20.length * 100)}%)`);
+  titles20.slice(0, 5).forEach((t, i) => console.log(`    ${i + 1}. ${t.content}`));
+  if (titles20.length > 5) console.log(`    ... (省略${titles20.length - 5}条)`);
+
+  const promos15 = await sdk.generatePromoShorts({
+    productInfo: product,
+    candidateCount: 15,
+    promotionType: 'discount',
+    includePrice: true,
+  });
+  console.log(`  促销语: 请求15条，实际返回 ${promos15.length} 条`);
+  const uniquePromos = new Set(promos15.map(p => p.content.substring(0, 10))).size;
+  console.log(`  促销语前缀不重复率: ${uniquePromos}/${promos15.length} (${Math.round(uniquePromos / promos15.length * 100)}%)`);
+  promos15.slice(0, 5).forEach((p, i) => console.log(`    ${i + 1}. ${p.content}`));
+  if (promos15.length > 5) console.log(`    ... (省略${promos15.length - 5}条)`);
+  console.log('');
+
+  // ========== 14. 极短长度限制 + 截断标记 ==========
+  console.log('14. 极短长度限制 + 截断标记判断');
+  const testText = '这是一段用于验证极短长度限制的测试文本内容。';
+  console.log(`  测试原文: ${testText}`);
+
+  const edgeCases: Array<{ label: string; limit: LengthLimit }> = [
+    { label: '0字上限', limit: { max: 0, unit: 'char' } },
+    { label: '1字上限', limit: { max: 1, unit: 'char' } },
+    { label: '2字上限', limit: { max: 2, unit: 'char' } },
+    { label: '3字上限', limit: { max: 3, unit: 'char' } },
+    { label: '0词上限', limit: { max: 0, unit: 'word' } },
+    { label: '1词上限', limit: { max: 1, unit: 'word' } },
+  ];
+
+  for (const ec of edgeCases) {
+    const detailed = sdk.truncateTextDetailed(testText, ec.limit);
+    console.log(`  ${ec.label}: "${detailed.text}" (被截: ${detailed.wasTruncated ? '是' : '否'}, 原长:${detailed.originalLength}, 现长:${detailed.finalLength}${detailed.truncatePoint !== undefined ? ', 截点:' + detailed.truncatePoint : ''})`);
+  }
+  console.log('');
+
+  // ========== 15. 生成长文并查看截断标记 ==========
+  console.log('15. 生成5条短标题，检查截断标记');
+  const ultraShortTitles = await sdk.generateTitles({
+    productInfo: product,
+    candidateCount: 5,
+    lengthLimit: { max: 10, unit: 'char' },
+  });
+  ultraShortTitles.forEach((t, i) => {
+    const status = t.wasTruncated ? `[已截断 @${t.truncateInfo?.truncatePoint}字]` : '[完整]';
+    console.log(`  ${i + 1}. ${t.content} ${status}`);
+  });
+  console.log('');
+
+  // ========== 16. 批量质量对比报告 ==========
+  console.log('16. 批量质量对比报告（相似组/关键词排名/排序理由）');
+  const titlesForBatch = await sdk.generateTitles({
+    productInfo: product,
+    candidateCount: 8,
+    keywords: ['SoundMax', '降噪', '599', '蓝牙'],
+  });
+  const titlesWithQuality = sdk.generateQualityReports(titlesForBatch, {
+    lengthLimit: { min: 8, max: 30, unit: 'char' },
+    keywords: ['SoundMax', '降噪', '599', '蓝牙'],
+    productInfo: product,
+  });
+  const batchReport = sdk.generateBatchQualityReport(titlesWithQuality, {
+    lengthLimit: { min: 8, max: 30, unit: 'char' },
+    keywords: ['SoundMax', '降噪', '599', '蓝牙'],
+    productInfo: product,
+    sortConfig: { criteria: ['keywords', 'quality', 'length'], weights: [0.4, 0.35, 0.25] },
+  });
+
+  console.log(`  总候选数: ${batchReport.totalCandidates}`);
+  console.log(`  长度合规: ${batchReport.summary.totalValidLength}条  |  关键词全中: ${batchReport.summary.totalWithAllKeywords}条  |  重复: ${batchReport.summary.totalWithDuplicates}条  |  核心完整: ${batchReport.summary.totalCompleteCoreInfo}条`);
+  console.log('');
+
+  console.log('  [相似组]');
+  if (batchReport.similarGroups.length === 0) console.log('    没有发现高度相似的文案');
+  batchReport.similarGroups.forEach(g => {
+    console.log(`    组${g.groupId}: ${g.candidateIds.length}条 (平均相似度${g.averageSimilarity}) 代表=${g.representativeId.substring(0, 10)}...`);
+    console.log(`      成员: ${g.candidateIds.map(id => id.substring(0, 10) + '...').join(', ')}`);
+  });
+  console.log('');
+
+  console.log('  [关键词覆盖 TOP3]');
+  batchReport.keywordRanking.slice(0, 3).forEach((kr, idx) => {
+    const cand = titlesWithQuality.find(c => c.id === kr.id);
+    console.log(`    ${idx + 1}. 覆盖${Math.round(kr.inclusionRate * 100)}% (${kr.includedCount}个) -> ${cand?.content.substring(0, 25)}`);
+  });
+  console.log('');
+
+  console.log('  [综合排序 TOP3 + 排序理由]');
+  batchReport.rankedCandidates.slice(0, 3).forEach(rc => {
+    const cand = titlesWithQuality.find(c => c.id === rc.id);
+    console.log(`    第${rc.rank}名 -> ${cand?.content.substring(0, 28)}`);
+    console.log(`      理由: ${rc.reasons.join('；')}`);
+    console.log(`      关键词排#${rc.keywordRank} | 长度排#${rc.lengthRank} | 质量排#${rc.qualityRank}`);
+  });
+  console.log('');
+
+  // ========== 17. 模板语法校验 ==========
+  console.log('17. 模板语法校验（保存模板前检查）');
+  const badTemplates = [
+    { name: '正常模板', content: '【{{品牌名}}】{{商品名}}限时{{折扣数}}折，仅{{活动价}}元！' },
+    { name: '未闭合占位符', content: '标题：{{商品名  限时特惠' },
+    { name: '多余的闭合括号', content: '{{商品名}} 价格{{价格}}元}}' },
+    { name: '空变量', content: '快来购买{{}}吧！' },
+    { name: '非法变量名', content: '{{商品 名}} 仅{{原 价}}元' },
+    { name: '重复变量', content: '{{品牌名}}荣誉出品{{品牌名}}{{商品名}}，来自{{品牌名}}' },
+  ];
+
+  badTemplates.forEach(bt => {
+    const v = sdk.validateTemplateContent(bt.content);
+    console.log(`  ${bt.name}: ${v.valid ? '✅通过' : '❌错误' + v.errorCount + '/' + '警告' + v.warningCount}`);
+    v.issues.forEach(iss => {
+      const pos = iss.position !== undefined ? `(位置${iss.position})` : '';
+      console.log(`    [${iss.severity === 'error' ? '错' : '警'}]${pos} ${iss.message}`);
+    });
+    if (v.suggestion) console.log(`    建议: ${v.suggestion}`);
+  });
+  console.log('');
+
+  // ========== 18. 批量模板健康度 ==========
+  console.log('18. 批量模板健康度（预览哪些能正常填充）');
+
+  const okTpl1 = sdk.addTemplate({
+    name: '详情页顶部横幅',
+    type: 'promo_short',
+    content: '{{品牌名}}{{产品名}}专场｜原价{{原价}}元，现价{{活动价}}元，限量{{库存}}件',
+  });
+  const okTpl2 = sdk.addTemplate({
+    name: '社交平台短文案',
+    type: 'title',
+    content: '种草{{产品名}}｜{{卖点1}}+{{卖点2}}，真的绝绝子！',
+  });
+  const badTpl = sdk.addTemplate({
+    name: '有语法问题的模板',
+    type: 'title',
+    content: '{{商品名 未闭合括号测试',
+  });
+
+  const health = sdk.getBatchTemplateHealth([
+    {
+      templateId: okTpl1.id,
+      variables: { '品牌名': 'SoundMax', '产品名': '耳机', '原价': '899', '活动价': '599', '库存': '100' },
+    },
+    {
+      templateId: okTpl1.id,
+      variables: { '品牌名': 'SoundMax', '产品名': '耳机' },
+    },
+    {
+      templateId: okTpl2.id,
+      variables: { '产品名': '降噪耳机', '卖点1': '音质好', '卖点2': '续航长' },
+    },
+    {
+      templateId: okTpl2.id,
+      variables: { '产品名': '降噪耳机' },
+    },
+    {
+      templateId: badTpl.id,
+      variables: {},
+    },
+  ]);
+
+  console.log(`  共${health.totalTemplates}个模板组合：可填充${health.fillableTemplates}｜部分填充${health.partiallyFillable}｜不可用${health.unfillableTemplates}｜语法有效${health.validTemplates}个`);
+  health.details.forEach(d => {
+    const mark = d.canFill ? '🟢可完全填充' : d.fillPercentage > 0 ? '🟡部分填充' : '🔴不可填充';
+    console.log(`  ${mark} ${d.templateName} (${d.fillPercentage}%)`);
+    d.variables.forEach(v => console.log(`    ${v.filled ? '✅' : '❌'} {{${v.name}}}`));
+    if (d.validation.issues.length > 0) {
+      d.validation.issues.slice(0, 2).forEach(iss => console.log(`    [${iss.severity}]${iss.message}`));
+    }
+  });
+  console.log('');
+
+  console.log('=== 全部增强功能演示完成 ===');
 }
 
 main().catch(console.error);

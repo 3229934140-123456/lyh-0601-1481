@@ -64,6 +64,8 @@ export type CopyCandidate = {
   sensitiveWords: SensitiveWordMatch[];
   hasSensitive: boolean;
   qualityReport?: QualityReport;
+  wasTruncated: boolean;
+  truncateInfo?: TruncateResult;
   createdAt: number;
   metadata?: Record<string, unknown>;
 };
@@ -196,6 +198,15 @@ export type SensitiveCheckResult = {
   level: SensitiveWordLevel;
 };
 
+export type TruncateResult = {
+  text: string;
+  wasTruncated: boolean;
+  originalLength: number;
+  finalLength: number;
+  unit: 'char' | 'word';
+  truncatePoint?: number;
+};
+
 export type LengthCheckResult = {
   valid: boolean;
   currentLength: number;
@@ -222,6 +233,37 @@ export type CoreInfoCheckResult = {
   completeness: number;
 };
 
+export type SimilarityGroup = {
+  groupId: string;
+  candidateIds: string[];
+  averageSimilarity: number;
+  representativeId: string;
+};
+
+export type RankedCandidate = {
+  id: string;
+  rank: number;
+  reasons: string[];
+  keywordRank?: number;
+  lengthRank?: number;
+  qualityRank?: number;
+};
+
+export type BatchQualityReport = {
+  totalCandidates: number;
+  similarGroups: SimilarityGroup[];
+  keywordRanking: Array<{ id: string; inclusionRate: number; includedCount: number }>;
+  lengthRanking: Array<{ id: string; length: number; valid: boolean }>;
+  qualityRanking: Array<{ id: string; overallScore: number }>;
+  rankedCandidates: RankedCandidate[];
+  summary: {
+    totalValidLength: number;
+    totalWithAllKeywords: number;
+    totalWithDuplicates: number;
+    totalCompleteCoreInfo: number;
+  };
+};
+
 export type QualityReport = {
   length: LengthCheckResult;
   keywords: KeywordCheckResult;
@@ -241,6 +283,41 @@ export type TemplatePreviewResult = {
   filledVariables: string[];
   missingVariables: string[];
   isComplete: boolean;
+};
+
+export type TemplateValidationIssue = {
+  type: 'duplicate_variable' | 'unclosed_placeholder' | 'unopened_placeholder' | 'empty_variable' | 'invalid_variable_name';
+  severity: 'error' | 'warning';
+  message: string;
+  position?: number;
+  variableName?: string;
+};
+
+export type TemplateValidationResult = {
+  valid: boolean;
+  variables: string[];
+  duplicateVariables: string[];
+  issues: TemplateValidationIssue[];
+  errorCount: number;
+  warningCount: number;
+  suggestion?: string;
+};
+
+export type BatchTemplateHealth = {
+  totalTemplates: number;
+  validTemplates: number;
+  invalidTemplates: number;
+  fillableTemplates: number;
+  partiallyFillable: number;
+  unfillableTemplates: number;
+  details: Array<{
+    templateId: string;
+    templateName: string;
+    canFill: boolean;
+    fillPercentage: number;
+    validation: TemplateValidationResult;
+    variables: { name: string; filled: boolean }[];
+  }>;
 };
 
 export type BatchFillResult = {

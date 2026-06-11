@@ -10,12 +10,14 @@ import type {
   GenerateOptions,
   SensitiveWordMatch,
   QualityReport,
+  TruncateResult,
+  BatchQualityReport,
 } from './types';
 import { AIClient } from './aiClient';
 import { SensitiveWordChecker } from './sensitive';
 import { sortCandidates, deduplicateCandidates } from './sorter';
 import { withRetry, withTimeout } from './retry';
-import { QualityChecker, truncateText } from './quality';
+import { QualityChecker, truncateText, truncateTextDetailed, generateBatchQualityReport } from './quality';
 
 function generateCandidateId(): string {
   return `cand_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
@@ -97,24 +99,40 @@ export class CopyGenerator {
         tags: c.tags,
         sensitiveWords: [],
         hasSensitive: false,
+        wasTruncated: false,
         createdAt: Date.now(),
       }));
 
       if (params.lengthLimit) {
-        candidates = candidates.map((c) => ({
-          ...c,
-          content: truncateText(c.content, params.lengthLimit),
-        }));
+        candidates = candidates.map((c) => {
+          const tResult: TruncateResult = truncateTextDetailed(c.content, params.lengthLimit);
+          return {
+            ...c,
+            content: tResult.text,
+            wasTruncated: tResult.wasTruncated,
+            truncateInfo: tResult.wasTruncated ? tResult : undefined,
+          };
+        });
       }
 
       if (opts.enableDeduplication) {
         const targetCount = params.candidateCount || 3;
-        let threshold = 0.75;
+        let threshold = 0.72;
         let deduplicated = deduplicateCandidates(candidates, threshold);
 
-        while (deduplicated.length < targetCount && threshold < 0.95) {
-          threshold += 0.05;
+        while (deduplicated.length < targetCount && threshold < 0.96) {
+          threshold += 0.04;
           deduplicated = deduplicateCandidates(candidates, threshold);
+        }
+
+        if (deduplicated.length < targetCount && candidates.length >= targetCount) {
+          const usedIds = new Set(deduplicated.map(d => d.id));
+          for (const c of candidates) {
+            if (!usedIds.has(c.id) && deduplicated.length < targetCount) {
+              deduplicated.push(c);
+              usedIds.add(c.id);
+            }
+          }
         }
 
         candidates = deduplicated.slice(0, Math.min(targetCount, deduplicated.length));
@@ -197,7 +215,35 @@ export class CopyGenerator {
     return this.qualityChecker.generateAllReports(candidates, options);
   }
 
+  public generateBatchQualityReport(
+    candidates: CopyCandidate[],
+    options: {
+      lengthLimit?: import('./types').LengthLimit;
+      keywords?: string[];
+      productInfo?: import('./types').ProductInfo;
+      sortConfig?: { criteria: string[]; weights: number[] };
+    } = {}
+  ): BatchQualityReport {
+    candidates.forEach(c => {
+      if (!c.qualityReport) {
+        c.qualityReport = this.qualityChecker.generateReport(c, {
+          ...options,
+          allCandidates: candidates,
+        });
+      }
+    });
+    return generateBatchQualityReport(candidates, options);
+  }
+
   public truncateText(text: string, limit: import('./types').LengthLimit): string {
     return truncateText(text, limit);
+  }
+
+  public truncateTextDetailed(text: string, limit: import('./types').LengthLimit): TruncateResult {
+    return truncateTextDetailed(text, limit);
+  }
+
+  public isTruncated(text: string, limit: import('./types').LengthLimit): boolean {
+    return truncateTextDetailed(text, limit).wasTruncated;
   }
 }

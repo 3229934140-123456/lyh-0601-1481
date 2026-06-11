@@ -20,6 +20,10 @@ import type {
   BatchFillResult,
   LengthLimit,
   ProductInfo,
+  TruncateResult,
+  BatchQualityReport,
+  TemplateValidationResult,
+  BatchTemplateHealth,
 } from './types';
 import { AIClient } from './aiClient';
 import { SensitiveWordChecker } from './sensitive';
@@ -27,7 +31,14 @@ import { TemplateManager } from './template';
 import { RecordManager } from './record';
 import { CopyGenerator } from './generator';
 import { sortCandidates } from './sorter';
-import { QualityChecker, truncateText as truncateTextUtil } from './quality';
+import {
+  QualityChecker,
+  truncateText as truncateTextUtil,
+  truncateTextDetailed as truncateTextDetailedUtil,
+  isTruncated as isTruncatedUtil,
+  generateBatchQualityReport as generateBatchQualityReportUtil,
+  findSimilarGroups as findSimilarGroupsUtil,
+} from './quality';
 
 function generateRecordId(): string {
   return `rec_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
@@ -232,8 +243,43 @@ export class CopySDK {
     return this.qualityChecker.generateAllReports(candidates, options);
   }
 
+  public generateBatchQualityReport(
+    candidates: CopyCandidate[],
+    options: {
+      lengthLimit?: LengthLimit;
+      keywords?: string[];
+      productInfo?: ProductInfo;
+      sortConfig?: { criteria: string[]; weights: number[] };
+    } = {}
+  ): BatchQualityReport {
+    candidates.forEach(c => {
+      if (!c.qualityReport) {
+        c.qualityReport = this.qualityChecker.generateReport(c, {
+          ...options,
+          allCandidates: candidates,
+        });
+      }
+    });
+    return generateBatchQualityReportUtil(candidates, options);
+  }
+
+  public findSimilarGroups(
+    candidates: CopyCandidate[],
+    threshold: number = 0.6
+  ) {
+    return findSimilarGroupsUtil(candidates, threshold);
+  }
+
   public truncateText(text: string, limit: LengthLimit): string {
     return truncateTextUtil(text, limit);
+  }
+
+  public truncateTextDetailed(text: string, limit: LengthLimit): TruncateResult {
+    return truncateTextDetailedUtil(text, limit);
+  }
+
+  public isTruncated(text: string, limit: LengthLimit): boolean {
+    return isTruncatedUtil(text, limit);
   }
 
   public getTemplate(id: string): CopyTemplate | null {
@@ -281,6 +327,20 @@ export class CopySDK {
     variables: Record<string, string>
   ): TemplatePreviewResult {
     return this.templateManager.previewTemplateContent(content, { variables });
+  }
+
+  public validateTemplateContent(content: string): TemplateValidationResult {
+    return this.templateManager.validateTemplateContent(content);
+  }
+
+  public validateTemplate(id: string): TemplateValidationResult {
+    return this.templateManager.validateTemplate(id);
+  }
+
+  public getBatchTemplateHealth(
+    items: Array<{ templateId: string; variables: Record<string, string> }>
+  ): BatchTemplateHealth {
+    return this.templateManager.getBatchHealth(items);
   }
 
   public batchFillTemplates(
